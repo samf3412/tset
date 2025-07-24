@@ -128,47 +128,6 @@ class WSO2APIManager:
         except Exception as e:
             return {'list': []}
     
-    def get_resource_mediation_policies(self, api_id, resource_path, resource_method):
-        """Get mediation policies for a specific resource"""
-        try:
-            # For old APIs, mediation policies can be attached to individual resources
-            # Try different URL patterns for resource-specific mediation policies
-            url_patterns = [
-                f"{self.publisher_url}/apis/{api_id}/resources/{resource_method.upper()}{resource_path}/mediation-policies",
-                f"{self.publisher_url}/apis/{api_id}/operations/{resource_method.upper()}{resource_path}/mediation-policies",
-                f"{self.publisher_url}/apis/{api_id}/resources/mediation-policies?resource={resource_path}&method={resource_method}",
-            ]
-            
-            headers = self.get_api_headers()
-            
-            for url in url_patterns:
-                try:
-                    response = self.session.get(url, headers=headers)
-                    if response.status_code == 200:
-                        policies = response.json()
-                        if policies.get('list'):
-                            print(f"Found resource-specific mediation policies for {resource_method} {resource_path}")
-                            return policies
-                except Exception as e:
-                    continue
-            
-            return {'list': []}
-        except Exception as e:
-            return {'list': []}
-    
-    def get_api_swagger_definition(self, api_id):
-        """Get API swagger definition which might contain mediation policy references"""
-        try:
-            url = f"{self.publisher_url}/apis/{api_id}/swagger"
-            headers = self.get_api_headers()
-            response = self.session.get(url, headers=headers)
-            
-            if response.status_code == 200:
-                return response.json()
-            return None
-        except Exception as e:
-            return None
-    
     def get_operation_policy_content(self, api_id, policy_id):
         try:
             url = f"{self.publisher_url}/apis/{api_id}/operation-policies/{policy_id}/content"
@@ -259,7 +218,6 @@ class WSO2APIManager:
             print(f"Content preview: {policy_content[:200]}...")
             
             # Pattern 1: Look for rootHost in J2 template files (most common for mediation policies)
-            # J2 files often contain Jinja2 template syntax with variables
             j2_patterns = [
                 r'rootHost["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # rootHost = "value" or rootHost: "value"
                 r'roothost["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # case insensitive
@@ -509,7 +467,6 @@ class WSO2APIManager:
                     print(f"    No operation policies found, checking attached mediation policies...")
                     
                     # For old APIs, check each mediation policy from the API-level list
-                    # but download and check the actual content for each resource
                     if api_mediation_policies.get('list'):
                         for policy in api_mediation_policies['list']:
                             policy_id = policy.get('id', '')
@@ -559,56 +516,10 @@ class WSO2APIManager:
                                             'has_policy_parameter': bool('parameter' in str(policy_content).lower())
                                         })
                                         found_endpoint = True
-                                        print(f"    ✅ Found rootHost in mediation policy: {roothost_value}")
+                                        print(f"    Found rootHost in mediation policy: {roothost_value}")
                                         break  # Found endpoint for this resource, move to next resource
                                 else:
-                                    print(f"    ❌ Failed to download policy content for: {policy_name}")
-                    else:
-                        print(f"    No mediation policies found at API level")
-                
-                # If still no endpoint found, use backend or mark as no endpoint
-                if not found_endpoint:
-                    print(f"    No policies with rootHost found, using backend or no endpoint")
-                    if backend_url:
-                        results.append({
-                            'api_id': api_id,
-                            'api_name': api_name,
-                            'api_version': api_version,
-                            'api_context': api_details.get('context', ''),
-                            'resource_path': resource_path,
-                            'resource_method': resource_method,
-                            'current_endpoint': backend_url,
-                            'new_endpoint': backend_url,
-                            'endpoint_type': 'backend_config',
-                            'api_type': 'backend_endpoint_based',
-                            'policy_name': 'N/A',
-                            'policy_attribute': 'N/A',
-                            'operation_policy_count': 0,
-                            'has_backend_conf': has_backend_conf,
-                            'has_policy_parameter': False
-                        })
-                    else:
-                        results.append({
-                            'api_id': api_id,
-                            'api_name': api_name,
-                            'api_version': api_version,
-                            'api_context': api_details.get('context', ''),
-                            'resource_path': resource_path,
-                            'resource_method': resource_method,
-                            'current_endpoint': '',
-                            'new_endpoint': '',
-                            'endpoint_type': 'no_endpoint',
-                            'api_type': 'no_endpoint_configured',
-                            'policy_name': 'N/A',
-                            'policy_attribute': 'N/A',
-                            'operation_policy_count': 0,
-                            'has_backend_conf': has_backend_conf,
-                            'has_policy_parameter': False
-                        })
-                                        print(f"    ✅ Found rootHost in mediation policy: {roothost_value}")
-                                        break  # Found endpoint for this resource, move to next resource
-                                else:
-                                    print(f"    ❌ Failed to download policy content for: {policy_name}")
+                                    print(f"    Failed to download policy content for: {policy_name}")
                     else:
                         print(f"    No mediation policies found at API level")
                 
@@ -676,7 +587,7 @@ class WSO2APIManager:
     
     def process_all_apis(self):
         try:
-            print("🔍 Starting API discovery...")
+            print("Starting API discovery...")
             all_apis = self.get_all_apis()
             if not all_apis:
                 return [], []
@@ -687,7 +598,7 @@ class WSO2APIManager:
             error_count = 0
             total_resources = 0
             
-            print(f"📊 Processing {total_apis} APIs for individual resource analysis...")
+            print(f"Processing {total_apis} APIs for individual resource analysis...")
             
             for i, api in enumerate(all_apis, 1):
                 api_id = api.get('id', '')
@@ -705,17 +616,17 @@ class WSO2APIManager:
                         print(f"  Found {len(api_results)} resources")
                     else:
                         error_count += 1
-                        print(f"  ⚠️  No results for {api_name}")
+                        print(f"  No results for {api_name}")
                 except Exception as e:
                     error_count += 1
-                    print(f"  ❌ Error processing {api_name}: {str(e)}")
+                    print(f"  Error processing {api_name}: {str(e)}")
                 
                 # Progress update every 50 APIs
                 if i % 50 == 0:
-                    print(f"  📊 Progress: {i}/{total_apis} APIs processed ({(i/total_apis)*100:.1f}%)")
-                    print(f"  📊 Resources found so far: {total_resources}")
+                    print(f"  Progress: {i}/{total_apis} APIs processed ({(i/total_apis)*100:.1f}%)")
+                    print(f"  Resources found so far: {total_resources}")
             
-            print(f"\n✅ API Processing Complete!")
+            print(f"\nAPI Processing Complete!")
             print(f"Successfully processed: {processed_count}/{total_apis} APIs")
             print(f"Total resources found: {total_resources}")
             print(f"Errors encountered: {error_count}")
@@ -754,38 +665,17 @@ class WSO2APIManager:
         print("="*80)
         
         # Basic Statistics
-        print(f"\n📊 BASIC STATISTICS:")
+        print(f"\nBASIC STATISTICS:")
         print(f"Total APIs searched: {len(all_apis)}")
         print(f"Total APIs processed successfully: {len(set(d['api_id'] for d in data))}")
         print(f"Total API resources found: {len(data)}")
-        
-        # Resource count verification
-        api_resource_counts = {}
-        for d in data:
-            api_id = d['api_id']
-            if api_id in api_resource_counts:
-                api_resource_counts[api_id] += 1
-            else:
-                api_resource_counts[api_id] = 1
-        
-        print(f"\nResource count verification:")
-        print(f"Total unique APIs: {len(api_resource_counts)}")
-        print(f"Average resources per API: {len(data)/len(api_resource_counts):.1f}")
-        
-        # Show sample API resource counts
-        print(f"\nSample API resource counts:")
-        sample_apis = list(api_resource_counts.items())[:5]
-        for api_id, count in sample_apis:
-            api_name = next((d['api_name'] for d in data if d['api_id'] == api_id), 'Unknown')
-            print(f"  {api_name}: {count} resources")
         
         # Policy Statistics
         operation_policies = [d for d in data if d.get('policy_attribute') == 'operation_policy']
         mediation_policies = [d for d in data if d.get('policy_attribute') == 'mediation_policy']
         no_policies = [d for d in data if d.get('policy_attribute') == 'N/A']
         
-        print(f"\n📋 POLICY STATISTICS:")
-        print(f"Resources with Operation Policies (NEW): {len(operation_policies)}")
+        print(f"\nPOLICY STATISTICS:")
         print(f"Resources with Mediation Policies (OLD): {len(mediation_policies)}")
         print(f"Resources with NO Policies: {len(no_policies)}")
         
@@ -796,7 +686,7 @@ class WSO2APIManager:
         backend_only = [d for d in data if d.get('endpoint_type') == 'backend_config']
         no_endpoints = [d for d in data if 'no_endpoint' in d.get('endpoint_type', '')]
         
-        print(f"\n🔗 ENDPOINT STATISTICS:")
+        print(f"\nENDPOINT STATISTICS:")
         print(f"Resources with RootHost parameters: {len(roothost_policies)}")
         print(f"Resources with Template variables: {len(template_policies)}")
         print(f"Resources with Hardcoded URLs: {len(hardcoded_policies)}")
@@ -805,7 +695,7 @@ class WSO2APIManager:
         
         # RootHost Details
         if roothost_policies:
-            print(f"\n🎯 ROOTHOST POLICY DETAILS:")
+            print(f"\nROOTHOST POLICY DETAILS:")
             roothost_values = {}
             for policy in roothost_policies:
                 endpoint = policy.get('current_endpoint', 'N/A')
@@ -818,22 +708,12 @@ class WSO2APIManager:
             for endpoint, count in sorted(roothost_values.items(), key=lambda x: x[1], reverse=True)[:10]:
                 print(f"  {endpoint}: {count} resources")
         
-        # Endpoint Type Distribution
-        endpoint_types = {}
-        for d in data:
-            endpoint_type = d.get('endpoint_type', 'unknown')
-            endpoint_types[endpoint_type] = endpoint_types.get(endpoint_type, 0) + 1
-        
-        print(f"\n📊 ENDPOINT TYPE DISTRIBUTION:")
-        for endpoint_type in sorted(endpoint_types.keys()):
-            print(f"{endpoint_type}: {endpoint_types[endpoint_type]} resources")
-        
         # Success Rate
         errors = [d for d in data if d.get('endpoint_type') == 'analysis_error']
         successful_resources = len(data) - len(errors)
         success_rate = (successful_resources / len(data)) * 100 if data else 0
         
-        print(f"\n✅ SUCCESS METRICS:")
+        print(f"\nSUCCESS METRICS:")
         print(f"Successful resource analysis: {successful_resources}/{len(data)} ({success_rate:.1f}%)")
         print(f"Resources with endpoints extracted: {len(roothost_policies + template_policies + hardcoded_policies)}")
         print(f"Resources with backend fallback: {len(backend_only)}")
@@ -867,9 +747,9 @@ def main():
         start_time = datetime.now()
         client = WSO2APIManager()
         
-        print(f"🔗 Connecting to: {client.base_url}")
-        print(f"👤 Username: {client.username}")
-        print(f"⏰ Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"Connecting to: {client.base_url}")
+        print(f"Username: {client.username}")
+        print(f"Started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
         
         data, all_apis = client.process_all_apis()
         
@@ -880,44 +760,19 @@ def main():
             # Generate detailed report
             report_stats = client.generate_detailed_report(data, all_apis)
             
-            # Generate summary report file
-            summary_file = output_file.replace('.csv', '_summary_report.txt')
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                f.write("WSO2 API Manager Extraction Summary Report\n")
-                f.write("=" * 50 + "\n\n")
-                f.write(f"Extraction Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"WSO2 Server: {client.base_url}\n")
-                f.write(f"Username: {client.username}\n\n")
-                
-                f.write("SUMMARY STATISTICS:\n")
-                f.write("-" * 20 + "\n")
-                f.write(f"Total APIs searched: {report_stats['total_apis_searched']}\n")
-                f.write(f"Total APIs processed: {report_stats['total_apis_processed']}\n")
-                f.write(f"Total resources: {report_stats['total_resources']}\n")
-                f.write(f"Success rate: {report_stats['success_rate']:.1f}%\n\n")
-                
-                f.write("POLICY BREAKDOWN:\n")
-                f.write("-" * 20 + "\n")
-                f.write(f"RootHost policies: {report_stats['roothost_policies']}\n")
-                f.write(f"Operation policies: {report_stats['operation_policies']}\n")
-                f.write(f"Mediation policies: {report_stats['mediation_policies']}\n\n")
-                
-                f.write(f"Detailed CSV data: {output_file}\n")
-            
             end_time = datetime.now()
             duration = end_time - start_time
             
-            print(f"\n⏰ TIMING INFORMATION:")
+            print(f"\nTIMING INFORMATION:")
             print(f"Started: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"Completed: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
             print(f"Duration: {duration}")
             print(f"Average time per API: {duration.total_seconds()/len(all_apis):.2f} seconds")
             
-            print(f"\n📁 OUTPUT FILES:")
+            print(f"\nOUTPUT FILES:")
             print(f"Main CSV data: {output_file}")
-            print(f"Summary report: {summary_file}")
             
-            print(f"\n🎉 EXTRACTION COMPLETED SUCCESSFULLY!")
+            print(f"\nEXTRACTION COMPLETED SUCCESSFULLY!")
             print(f"Found {report_stats['total_apis_searched']} APIs with {report_stats['total_resources']} total resources")
             print(f"Extracted {report_stats['roothost_policies']} RootHost policies")
             
@@ -929,10 +784,10 @@ def main():
                     print(f"  - {sample['api_name']} [{sample['resource_method']} {sample['resource_path']}]: {sample['current_endpoint']}")
             
         else:
-            print("❌ No data extracted. Check credentials and connectivity.")
+            print("No data extracted. Check credentials and connectivity.")
     
     except Exception as e:
-        print(f"❌ Script failed: {str(e)}")
+        print(f"Script failed: {str(e)}")
         import traceback
         traceback.print_exc()
 
