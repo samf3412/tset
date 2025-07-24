@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 WSO2 API Manager 4.2 - Policy Endpoint Extractor
-Complete fixed version without logger issues
+Clean version without any errors
 """
 
 import requests
@@ -48,7 +48,7 @@ def create_default_config_file(config_file: str):
 
 class WSO2APIManager:
     def __init__(self, config_file: str = "policy_config.json"):
-        """Initialize WSO2 API Manager client with configuration from JSON file"""
+        """Initialize WSO2 API Manager client"""
         self.config = self.load_config(config_file)
         self.base_url = self.config['publisher_url'].rstrip('/')
         self.username = self.config['username']
@@ -59,11 +59,9 @@ class WSO2APIManager:
         self.session = requests.Session()
         self.session.verify = self.verify_ssl
         
-        # Disable SSL warnings if verify_ssl is False
         if not self.verify_ssl:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
-        # API endpoints
         self.publisher_url = f"{self.base_url}/api/am/publisher/v4"
         
     def load_config(self, config_file: str) -> Dict:
@@ -77,7 +75,6 @@ class WSO2APIManager:
             with open(config_file, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             
-            # Validate required fields
             required_fields = ['publisher_url', 'username', 'password']
             for field in required_fields:
                 if field not in config:
@@ -101,10 +98,8 @@ class WSO2APIManager:
     def get_access_token(self) -> bool:
         """Generate access token for API calls"""
         try:
-            # Encode credentials
             auth_header = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
             
-            # Get access token using password grant
             token_url = f"{self.base_url}/oauth2/token"
             headers = {
                 'Authorization': f'Basic {auth_header}',
@@ -181,7 +176,6 @@ class WSO2APIManager:
                 return None
                 
         except Exception as e:
-            print(f"❌ Error getting API details: {str(e)}")
             return None
     
     def get_api_mediation_policies(self, api_id: str) -> Dict:
@@ -228,30 +222,25 @@ class WSO2APIManager:
     
     def decompress_policy_content(self, compressed_content: bytes) -> Optional[str]:
         """Decompress policy content (handles ZIP and GZIP)"""
-        # Try ZIP decompression first
         try:
             with zipfile.ZipFile(io.BytesIO(compressed_content)) as zip_file:
                 file_list = zip_file.namelist()
                 
-                # Priority order: .j2 files first
                 for filename in file_list:
                     if filename.endswith('.j2'):
                         with zip_file.open(filename) as file:
                             return file.read().decode('utf-8')
                 
-                # Then XML files
                 for filename in file_list:
                     if filename.endswith('.xml'):
                         with zip_file.open(filename) as file:
                             return file.read().decode('utf-8')
                 
-                # Then YAML files
                 for filename in file_list:
                     if filename.endswith('.yaml') or filename.endswith('.yml'):
                         with zip_file.open(filename) as file:
                             return file.read().decode('utf-8')
                 
-                # Get first file if no specific types found
                 if file_list:
                     with zip_file.open(file_list[0]) as file:
                         return file.read().decode('utf-8')
@@ -261,14 +250,12 @@ class WSO2APIManager:
         except Exception:
             pass
         
-        # Try GZIP decompression
         try:
             decompressed = gzip.decompress(compressed_content)
             return decompressed.decode('utf-8')
         except Exception:
             pass
         
-        # Try as plain text
         try:
             return compressed_content.decode('utf-8')
         except Exception:
@@ -298,7 +285,6 @@ class WSO2APIManager:
             roothost_value = ""
             endpoint_type = "unknown"
             
-            # Check for hardcoded URLs
             url_patterns = [
                 r'<address\s+uri=["\']([^"\']+)["\']',
                 r'<endpoint[^>]*>.*?<address[^>]+uri=["\']([^"\']+)["\']',
@@ -313,7 +299,6 @@ class WSO2APIManager:
                     endpoint_type = "operation_policy_hardcoded_url"
                     break
             
-            # Check for templates
             if not roothost_value:
                 template_patterns = [
                     r'\{\{([^}]+)\}\}',
@@ -331,7 +316,6 @@ class WSO2APIManager:
                         if roothost_value:
                             break
             
-            # Check for YAML parameters
             if not roothost_value and ('yaml' in policy_content.lower() or 'parameters:' in policy_content):
                 yaml_patterns = [
                     r'rootHost:\s*([^\n\r]+)',
@@ -347,7 +331,6 @@ class WSO2APIManager:
                         endpoint_type = "operation_policy_yaml_parameter"
                         break
             
-            # Check for parameters
             if not roothost_value:
                 param_patterns = [
                     r'<parameter[^>]*name=["\']([^"\']*host[^"\']*)["\'][^>]*>([^<]+)',
@@ -375,7 +358,6 @@ class WSO2APIManager:
             if not api_details:
                 return []
             
-            # Check backend configuration
             backend_endpoints = api_details.get('endpointConfig', {})
             backend_url = None
             has_backend_conf = False
@@ -407,7 +389,6 @@ class WSO2APIManager:
                 })
                 return results
             
-            # Process each operation
             for operation in operations:
                 resource_path = operation.get('target', '/')
                 resource_method = operation.get('verb', 'GET')
@@ -425,7 +406,6 @@ class WSO2APIManager:
                         break
                 
                 if all_operation_policies:
-                    # NEW API with operation policies
                     for policy in all_operation_policies:
                         policy_id = policy.get('policyId', '')
                         policy_name = policy.get('policyName', '')
@@ -442,7 +422,6 @@ class WSO2APIManager:
                                 if not has_policy_parameter and ('parameter' in policy_content.lower() or 'param' in policy_content.lower()):
                                     has_policy_parameter = True
                                 
-                                # Determine types
                                 if 'hardcoded' in endpoint_type:
                                     api_type = "operation_policy_based"
                                     final_endpoint_type = "operation_policy_hardcoded"
@@ -495,7 +474,6 @@ class WSO2APIManager:
                                     'has_policy_parameter': has_policy_parameter
                                 })
                 else:
-                    # Check for OLD API mediation policies
                     old_api_policies = self.get_api_mediation_policies(api_id)
                     mediation_policy_count = len(old_api_policies.get('list', [])) if old_api_policies else 0
                     
@@ -508,7 +486,6 @@ class WSO2APIManager:
                                 break
                     
                     if old_api_policies and old_api_policies.get('list'):
-                        # OLD API with mediation policies
                         for policy in old_api_policies['list']:
                             policy_id = policy.get('id', '')
                             policy_name = policy.get('name', '')
@@ -526,7 +503,6 @@ class WSO2APIManager:
                                     if 'parameter' in policy_content.lower() or 'param' in policy_content.lower():
                                         has_mediation_policy_parameter = True
                                     
-                                    # Determine API type based on mediation policy
                                     if 'hardcoded' in endpoint_type:
                                         api_type = "mediation_policy_based"
                                         final_endpoint_type = "mediation_policy_hardcoded"
@@ -579,7 +555,6 @@ class WSO2APIManager:
                                         'has_policy_parameter': has_mediation_policy_parameter
                                     })
                     else:
-                        # No policies found - check if backend endpoint exists
                         if backend_url:
                             results.append({
                                 'api_id': api_id,
@@ -618,7 +593,6 @@ class WSO2APIManager:
                             })
         
         except Exception as e:
-            print(f"Error analyzing API {api_id}: {str(e)}")
             results.append({
                 'api_id': api_id,
                 'api_name': api_name,
@@ -642,12 +616,10 @@ class WSO2APIManager:
     def process_all_apis_for_endpoints(self) -> List[Dict]:
         """Process all APIs to extract endpoint information"""
         try:
-            # Get fresh access token
             if not self.get_access_token():
                 print("Failed to authenticate with provided credentials")
                 return []
             
-            # Get all APIs
             all_apis = self.get_all_apis()
             
             if not all_apis:
@@ -666,7 +638,6 @@ class WSO2APIManager:
                 
                 print(f"[{i}/{total_apis}] Processing: {api_name} v{api_version}")
                 
-                # Analyze this API
                 api_results = self.analyze_api_for_endpoints_and_policies(api_id, api_name, api_version)
                 all_results.extend(api_results)
             
@@ -692,6 +663,39 @@ class WSO2APIManager:
             with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writeheader()
+                writer.writerows(data)
+            
+            print(f"✅ Data saved to {output_file}")
+            
+        except Exception as e:
+            print(f"❌ Error saving to CSV: {str(e)}")
+    
+    def generate_no_endpoints_report(self, data: List[Dict], output_file: str):
+        """Generate detailed report for APIs without endpoints"""
+        try:
+            no_endpoint_data = [d for d in data if d['endpoint_type'] == 'no_endpoint']
+            
+            api_summary = {}
+            for row in no_endpoint_data:
+                api_key = f"{row['api_name']}_v{row['api_version']}"
+                if api_key not in api_summary:
+                    api_summary[api_key] = {
+                        'api_id': row['api_id'],
+                        'api_name': row['api_name'],
+                        'api_version': row['api_version'],
+                        'api_context': row['api_context'],
+                        'total_resources': 0,
+                        'resources_without_endpoints': 0
+                    }
+                api_summary[api_key]['total_resources'] += 1
+                if row['endpoint_type'] == 'no_endpoint':
+                    api_summary[api_key]['resources_without_endpoints'] += 1
+            
+            fieldnames = ['api_id', 'api_name', 'api_version', 'api_context', 'total_resources', 'resources_without_endpoints']
+            
+            with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
                 for api_data in api_summary.values():
                     writer.writerow(api_data)
             
@@ -702,11 +706,9 @@ class WSO2APIManager:
 
 def print_summary_statistics(data: List[Dict], output_file: str):
     """Print summary statistics for the extracted data"""
-    # Filter data by policy attributes
     operation_policies = [d for d in data if d.get('policy_attribute') == 'operation_policy']
     mediation_policies = [d for d in data if d.get('policy_attribute') == 'mediation_policy']
     
-    # Filter by endpoint types
     policy_hardcoded = [d for d in data if 'hardcoded' in d['endpoint_type']]
     policy_dynamic = [d for d in data if 'dynamic' in d['endpoint_type']]
     policy_yaml = [d for d in data if 'yaml' in d['endpoint_type']]
@@ -714,7 +716,6 @@ def print_summary_statistics(data: List[Dict], output_file: str):
     backend_config = [d for d in data if d['endpoint_type'] == 'backend_config']
     no_endpoints = [d for d in data if d['endpoint_type'] == 'no_endpoint']
     
-    # Boolean field statistics
     apis_with_backend_conf = [d for d in data if d['has_backend_conf'] == True]
     apis_with_policy_params = [d for d in data if d['has_policy_parameter'] == True]
     
@@ -740,14 +741,12 @@ def print_summary_statistics(data: List[Dict], output_file: str):
     print(f"APIs with backend configuration: {len(set(d['api_id'] for d in apis_with_backend_conf))}")
     print(f"APIs with policy parameters: {len(set(d['api_id'] for d in apis_with_policy_params))}")
     
-    # Endpoint coverage
     apis_with_endpoints = len(set(d['api_id'] for d in data if d['new_endpoint']))
     apis_without_endpoints = len(set(d['api_id'] for d in data if not d['new_endpoint']))
     print(f"\n📈 ENDPOINT COVERAGE:")
     print(f"APIs with endpoints found: {apis_with_endpoints}")
     print(f"APIs without endpoints: {apis_without_endpoints}")
     
-    # Sample hardcoded endpoints
     if policy_hardcoded:
         print(f"\n🔍 SAMPLE HARDCODED ENDPOINTS:")
         unique_endpoints = list(set(d['new_endpoint'] for d in policy_hardcoded if d['new_endpoint']))[:5]
@@ -762,30 +761,25 @@ def main():
     
     config_file = "policy_config.json"
     
-    # Check if config file creation is requested
     if len(sys.argv) > 1 and sys.argv[1] == "--create-config":
         create_default_config_file(config_file)
         return
     
     try:
-        # Initialize WSO2 API Manager client with config file
         wso2_client = WSO2APIManager(config_file)
         
         print(f"\n📡 Connecting to: {wso2_client.base_url}")
         print(f"👤 Username: {wso2_client.username}")
         print(f"🔒 SSL Verification: {wso2_client.verify_ssl}")
         
-        # Process all APIs
         data = wso2_client.process_all_apis_for_endpoints()
         
         if data:
             output_file = wso2_client.config.get('output_csv', 'wso2_policy_endpoints.csv')
             wso2_client.save_to_csv(data, output_file)
             
-            # Print summary statistics
             print_summary_statistics(data, output_file)
             
-            # Generate no endpoints report if needed
             no_endpoints = [d for d in data if d['endpoint_type'] == 'no_endpoint']
             if no_endpoints:
                 no_endpoint_file = output_file.replace('.csv', '_no_endpoints.csv')
@@ -806,38 +800,3 @@ def main():
 
 if __name__ == "__main__":
     main()
- fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(data)
-            
-            print(f"✅ Data saved to {output_file}")
-            
-        except Exception as e:
-            print(f"❌ Error saving to CSV: {str(e)}")
-    
-    def generate_no_endpoints_report(self, data: List[Dict], output_file: str):
-        """Generate detailed report for APIs without endpoints"""
-        try:
-            no_endpoint_data = [d for d in data if d['endpoint_type'] == 'no_endpoint']
-            
-            # Group by API
-            api_summary = {}
-            for row in no_endpoint_data:
-                api_key = f"{row['api_name']}_v{row['api_version']}"
-                if api_key not in api_summary:
-                    api_summary[api_key] = {
-                        'api_id': row['api_id'],
-                        'api_name': row['api_name'],
-                        'api_version': row['api_version'],
-                        'api_context': row['api_context'],
-                        'total_resources': 0,
-                        'resources_without_endpoints': 0
-                    }
-                api_summary[api_key]['total_resources'] += 1
-                if row['endpoint_type'] == 'no_endpoint':
-                    api_summary[api_key]['resources_without_endpoints'] += 1
-            
-            fieldnames = ['api_id', 'api_name', 'api_version', 'api_context', 'total_resources', 'resources_without_endpoints']
-            
-            with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.DictWriter(csvfile,
