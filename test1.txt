@@ -116,6 +116,7 @@ class WSO2APIManager:
             return None
     
     def get_mediation_policies(self, api_id):
+        """Get API-level mediation policies"""
         try:
             url = f"{self.publisher_url}/apis/{api_id}/mediation-policies"
             headers = self.get_api_headers()
@@ -126,6 +127,47 @@ class WSO2APIManager:
             return {'list': []}
         except Exception as e:
             return {'list': []}
+    
+    def get_resource_mediation_policies(self, api_id, resource_path, resource_method):
+        """Get mediation policies for a specific resource"""
+        try:
+            # For old APIs, mediation policies can be attached to individual resources
+            # Try different URL patterns for resource-specific mediation policies
+            url_patterns = [
+                f"{self.publisher_url}/apis/{api_id}/resources/{resource_method.upper()}{resource_path}/mediation-policies",
+                f"{self.publisher_url}/apis/{api_id}/operations/{resource_method.upper()}{resource_path}/mediation-policies",
+                f"{self.publisher_url}/apis/{api_id}/resources/mediation-policies?resource={resource_path}&method={resource_method}",
+            ]
+            
+            headers = self.get_api_headers()
+            
+            for url in url_patterns:
+                try:
+                    response = self.session.get(url, headers=headers)
+                    if response.status_code == 200:
+                        policies = response.json()
+                        if policies.get('list'):
+                            print(f"Found resource-specific mediation policies for {resource_method} {resource_path}")
+                            return policies
+                except Exception as e:
+                    continue
+            
+            return {'list': []}
+        except Exception as e:
+            return {'list': []}
+    
+    def get_api_swagger_definition(self, api_id):
+        """Get API swagger definition which might contain mediation policy references"""
+        try:
+            url = f"{self.publisher_url}/apis/{api_id}/swagger"
+            headers = self.get_api_headers()
+            response = self.session.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                return response.json()
+            return None
+        except Exception as e:
+            return None
     
     def get_operation_policy_content(self, api_id, policy_id):
         try:
@@ -397,8 +439,11 @@ class WSO2APIManager:
                 has_policy_parameter = False
                 found_endpoint = False
                 
+                print(f"  Processing resource: {resource_method} {resource_path}")
+                
                 # Check for operation-level policies (NEW APIs)
                 if all_operation_policies:
+                    print(f"    Found {len(all_operation_policies)} operation policies")
                     for policy in all_operation_policies:
                         policy_id = policy.get('policyId', '')
                         policy_name = policy.get('policyName', '')
@@ -447,43 +492,100 @@ class WSO2APIManager:
                                     found_endpoint = True
                                     break  # Found endpoint for this resource, move to next resource
                 
-                # If no operation policies found, check API-level mediation policies (OLD APIs)
-                if not found_endpoint and api_level_policies:
-                    for policy_id, policy_info in api_level_policies.items():
-                        if policy_info['roothost_value']:
-                            # Determine API type for mediation policies
-                            if 'roothost' in policy_info['endpoint_type'].lower():
-                                api_type = "mediation_policy_based"
-                                final_endpoint_type = "mediation_policy_roothost"
-                            elif 'template' in policy_info['endpoint_type'].lower():
-                                api_type = "mediation_policy_based"
-                                final_endpoint_type = "mediation_policy_dynamic"
-                            elif 'hardcoded' in policy_info['endpoint_type'].lower():
-                                api_type = "mediation_policy_based"
-                                final_endpoint_type = "mediation_policy_hardcoded"
-                            else:
-                                api_type = "mediation_policy_based"
-                                final_endpoint_type = policy_info['endpoint_type']
+                # If no operation policies found, check for resource-specific mediation policies (OLD APIs)
+                if not found_endpoint:
+                    print(f"    No operation policies found, checking resource-specific mediation policies...")
+                    
+                    # First try resource-specific mediation policies
+                    resource_mediation_policies = self.get_resource_mediation_policies(api_id, resource_path, resource_method)
+                    
+                    if resource_mediation_policies.get('list'):
+                        print(f"    Found {len(resource_mediation_policies['list'])} resource-specific mediation policies")
+                        for policy in resource_mediation_policies['list']:
+                            policy_id = policy.get('id', '')
+                            policy_name = policy.get('name', '')
                             
-                            results.append({
-                                'api_id': api_id,
-                                'api_name': api_name,
-                                'api_version': api_version,
-                                'api_context': api_details.get('context', ''),
-                                'resource_path': resource_path,
-                                'resource_method': resource_method,
-                                'current_endpoint': policy_info['roothost_value'],
-                                'new_endpoint': policy_info['roothost_value'],
-                                'endpoint_type': final_endpoint_type,
-                                'api_type': api_type,
-                                'policy_name': policy_info['policy_name'],
-                                'policy_attribute': policy_info['policy_attribute'],
-                                'operation_policy_count': len(api_level_policies),
-                                'has_backend_conf': has_backend_conf,
-                                'has_policy_parameter': policy_info['has_parameters']
-                            })
-                            found_endpoint = True
-                            break  # Found endpoint for this resource, move to next resource
+                            if policy_id:
+                                policy_content = self.download_mediation_policy(api_id, policy_id)
+                                if policy_content:
+                                    print(f"    Analyzing resource mediation policy: {policy_name}")
+                                    roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content, policy_name)
+                                    
+                                    if roothost_value:
+                                        # Determine API type for mediation policies
+                                        if 'roothost' in endpoint_type.lower():
+                                            api_type = "mediation_policy_based"
+                                            final_endpoint_type = "mediation_policy_roothost"
+                                        elif 'template' in endpoint_type.lower():
+                                            api_type = "mediation_policy_based"
+                                            final_endpoint_type = "mediation_policy_dynamic"
+                                        elif 'hardcoded' in endpoint_type.lower():
+                                            api_type = "mediation_policy_based"
+                                            final_endpoint_type = "mediation_policy_hardcoded"
+                                        else:
+                                            api_type = "mediation_policy_based"
+                                            final_endpoint_type = endpoint_type
+                                        
+                                        results.append({
+                                            'api_id': api_id,
+                                            'api_name': api_name,
+                                            'api_version': api_version,
+                                            'api_context': api_details.get('context', ''),
+                                            'resource_path': resource_path,
+                                            'resource_method': resource_method,
+                                            'current_endpoint': roothost_value,
+                                            'new_endpoint': roothost_value,
+                                            'endpoint_type': final_endpoint_type,
+                                            'api_type': api_type,
+                                            'policy_name': policy_name,
+                                            'policy_attribute': 'mediation_policy',
+                                            'operation_policy_count': 1,
+                                            'has_backend_conf': has_backend_conf,
+                                            'has_policy_parameter': bool('parameter' in str(policy_content).lower())
+                                        })
+                                        found_endpoint = True
+                                        print(f"    ✅ Found rootHost in resource mediation policy: {roothost_value}")
+                                        break  # Found endpoint for this resource
+                    
+                    # If no resource-specific policies, check API-level mediation policies
+                    if not found_endpoint and api_level_policies:
+                        print(f"    No resource-specific policies, checking API-level mediation policies...")
+                        for policy_id, policy_info in api_level_policies.items():
+                            if policy_info['roothost_value']:
+                                # Determine API type for mediation policies
+                                if 'roothost' in policy_info['endpoint_type'].lower():
+                                    api_type = "mediation_policy_based"
+                                    final_endpoint_type = "mediation_policy_roothost"
+                                elif 'template' in policy_info['endpoint_type'].lower():
+                                    api_type = "mediation_policy_based"
+                                    final_endpoint_type = "mediation_policy_dynamic"
+                                elif 'hardcoded' in policy_info['endpoint_type'].lower():
+                                    api_type = "mediation_policy_based"
+                                    final_endpoint_type = "mediation_policy_hardcoded"
+                                else:
+                                    api_type = "mediation_policy_based"
+                                    final_endpoint_type = policy_info['endpoint_type']
+                                
+                                results.append({
+                                    'api_id': api_id,
+                                    'api_name': api_name,
+                                    'api_version': api_version,
+                                    'api_context': api_details.get('context', ''),
+                                    'resource_path': resource_path,
+                                    'resource_method': resource_method,
+                                    'current_endpoint': policy_info['roothost_value'],
+                                    'new_endpoint': policy_info['roothost_value'],
+                                    'endpoint_type': final_endpoint_type,
+                                    'api_type': api_type,
+                                    'policy_name': policy_info['policy_name'],
+                                    'policy_attribute': policy_info['policy_attribute'],
+                                    'operation_policy_count': len(api_level_policies),
+                                    'has_backend_conf': has_backend_conf,
+                                    'has_policy_parameter': policy_info['has_parameters']
+                                })
+                                found_endpoint = True
+                                print(f"    ✅ Found rootHost in API-level mediation policy: {policy_info['roothost_value']}")
+                                break  # Found endpoint for this resource
                 
                 # If still no endpoint found, use backend or mark as no endpoint
                 if not found_endpoint:
