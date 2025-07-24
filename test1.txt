@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-WSO2 API Manager 4.2 - Policy Endpoint Extractor
-Clean version without any errors
-"""
-
 import requests
 import json
 import base64
@@ -15,47 +9,49 @@ import gzip
 import io
 import csv
 import sys
-from typing import Optional, Dict, List, Tuple
 import re
 
-def create_default_config_file(config_file: str):
-    """Create a default configuration file"""
-    default_config = {
+def create_config():
+    config = {
         "publisher_url": "https://localhost:9443",
         "username": "admin",
         "password": "admin",
         "verify_ssl": False,
         "output_csv": "wso2_policy_endpoints.csv",
-        "description": "WSO2 API Manager configuration file",
-        "created_date": datetime.now().isoformat(),
+        "auth_method": "auto",
         "instructions": {
-            "publisher_url": "Base URL of your WSO2 API Manager instance",
-            "username": "WSO2 username with publisher/admin access",
+            "auth_method": "Options: auto, client_credentials, password, basic_auth",
+            "publisher_url": "WSO2 API Manager base URL",
+            "username": "WSO2 username with admin/publisher access",
             "password": "WSO2 password",
-            "verify_ssl": "Set to false for self-signed certificates",
-            "output_csv": "Output CSV filename"
+            "verify_ssl": "Set to false for self-signed certificates"
         }
     }
     
-    try:
-        with open(config_file, 'w', encoding='utf-8') as f:
-            json.dump(default_config, f, indent=4, ensure_ascii=False)
-        print(f"✅ Sample configuration file created: {config_file}")
-        print("📝 Please update the configuration with your WSO2 details before running the extractor.")
-    except Exception as e:
-        print(f"❌ Error creating config file: {str(e)}")
-        sys.exit(1)
+    with open("policy_config.json", 'w') as f:
+        json.dump(config, f, indent=4)
+    print("Config file created: policy_config.json")
+    print("Please update with your WSO2 details")
+    print("\nAuthentication methods:")
+    print("- auto: Try all methods automatically (recommended)")
+    print("- client_credentials: Register app and use client credentials")
+    print("- password: Use password grant with default clients")
+    print("- basic_auth: Use basic authentication directly")
 
 class WSO2APIManager:
-    def __init__(self, config_file: str = "policy_config.json"):
-        """Initialize WSO2 API Manager client"""
-        self.config = self.load_config(config_file)
+    def __init__(self):
+        with open("policy_config.json", 'r') as f:
+            self.config = json.load(f)
+        
         self.base_url = self.config['publisher_url'].rstrip('/')
         self.username = self.config['username']
         self.password = self.config['password']
         self.verify_ssl = self.config.get('verify_ssl', True)
         
         self.access_token = None
+        self.client_id = None
+        self.client_secret = None
+        self.use_basic_auth = False
         self.session = requests.Session()
         self.session.verify = self.verify_ssl
         
@@ -63,42 +59,75 @@ class WSO2APIManager:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
         self.publisher_url = f"{self.base_url}/api/am/publisher/v4"
-        
-    def load_config(self, config_file: str) -> Dict:
-        """Load configuration from JSON file"""
+    
+    def get_access_token(self):
         try:
-            if not os.path.exists(config_file):
-                print(f"Configuration file '{config_file}' not found. Creating default configuration...")
-                create_default_config_file(config_file)
-                sys.exit(1)
+            # Method 1: Try with application registration first
+            if self.register_application():
+                print("Using registered application credentials")
+                return self.get_token_with_client_credentials()
             
-            with open(config_file, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-            
-            required_fields = ['publisher_url', 'username', 'password']
-            for field in required_fields:
-                if field not in config:
-                    raise ValueError(f"Missing required field '{field}' in config file")
-            
-            print(f"✅ Configuration loaded from {config_file}")
-            return config
+            # Method 2: Try with admin credentials directly
+            print("Trying direct admin authentication")
+            return self.get_token_with_admin_credentials()
             
         except Exception as e:
-            print(f"❌ Error loading config file: {str(e)}")
-            sys.exit(1)
+            print(f"Error getting token: {str(e)}")
+            return False
     
-    def get_api_headers(self) -> Dict[str, str]:
-        """Get headers for API requests"""
-        return {
-            'Authorization': f'Bearer {self.access_token}',
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
-    
-    def get_access_token(self) -> bool:
-        """Generate access token for API calls"""
+    def register_application(self):
+        """Register a new application to get client credentials"""
         try:
+            print("Attempting to register application...")
             auth_header = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
+            
+            # Try different registration endpoints
+            registration_endpoints = [
+                f"{self.base_url}/client-registration/v0.17/register",
+                f"{self.base_url}/client-registration/v0.16/register", 
+                f"{self.base_url}/client-registration/v0.15/register"
+            ]
+            
+            headers = {
+                'Authorization': f'Basic {auth_header}',
+                'Content-Type': 'application/json'
+            }
+            
+            app_data = {
+                "clientName": "WSO2_Policy_Extractor",
+                "callbackUrl": "https://localhost",
+                "grantType": "client_credentials password",
+                "saasApp": True
+            }
+            
+            for endpoint in registration_endpoints:
+                print(f"Trying registration endpoint: {endpoint}")
+                try:
+                    response = self.session.post(endpoint, headers=headers, json=app_data)
+                    print(f"Registration response: {response.status_code}")
+                    
+                    if response.status_code == 201:
+                        app_info = response.json()
+                        self.client_id = app_info.get('clientId')
+                        self.client_secret = app_info.get('clientSecret')
+                        print(f"Application registered successfully with client ID: {self.client_id}")
+                        return True
+                    else:
+                        print(f"Registration failed: {response.text}")
+                except Exception as e:
+                    print(f"Error with endpoint {endpoint}: {str(e)}")
+                    continue
+            
+            return False
+                
+        except Exception as e:
+            print(f"Error registering application: {str(e)}")
+            return False
+    
+    def get_token_with_client_credentials(self):
+        """Get token using registered client credentials"""
+        try:
+            auth_header = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
             
             token_url = f"{self.base_url}/oauth2/token"
             headers = {
@@ -106,9 +135,7 @@ class WSO2APIManager:
                 'Content-Type': 'application/x-www-form-urlencoded'
             }
             data = {
-                'grant_type': 'password',
-                'username': self.username,
-                'password': self.password,
+                'grant_type': 'client_credentials',
                 'scope': 'apim:api_view apim:api_create apim:api_publish'
             }
             
@@ -116,18 +143,95 @@ class WSO2APIManager:
             if response.status_code == 200:
                 token_data = response.json()
                 self.access_token = token_data.get('access_token')
-                print("✅ Access token obtained successfully")
+                print("Access token obtained with client credentials")
                 return True
             else:
-                print(f"❌ Failed to get access token: {response.status_code} - {response.text}")
+                print(f"Failed to get token with client credentials: {response.status_code}")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error getting access token: {str(e)}")
+            print(f"Error getting token with client credentials: {str(e)}")
             return False
     
-    def get_all_apis(self) -> List[Dict]:
-        """Get list of all APIs"""
+    def get_token_with_admin_credentials(self):
+        """Get token using admin username/password directly"""
+        try:
+            print("Trying default OAuth clients...")
+            # Try using the admin credentials directly with known clients
+            default_clients = [
+                ('admin', 'admin'),  # Default admin client
+                ('apim_devportal', 'apim_devportal'),  # Default devportal client
+                ('apim_publisher', 'apim_publisher'),  # Default publisher client
+                ('wso2carbon', 'wso2carbon'),  # Another common default
+                ('client', 'client'),  # Simple default
+            ]
+            
+            token_url = f"{self.base_url}/oauth2/token"
+            
+            for client_id, client_secret in default_clients:
+                print(f"Trying client: {client_id}")
+                auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+                
+                headers = {
+                    'Authorization': f'Basic {auth_header}',
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+                data = {
+                    'grant_type': 'password',
+                    'username': self.username,
+                    'password': self.password,
+                    'scope': 'apim:api_view apim:api_create apim:api_publish'
+                }
+                
+                try:
+                    response = self.session.post(token_url, headers=headers, data=data)
+                    print(f"Response for {client_id}: {response.status_code}")
+                    
+                    if response.status_code == 200:
+                        token_data = response.json()
+                        self.access_token = token_data.get('access_token')
+                        print(f"✅ Access token obtained using {client_id} client")
+                        return True
+                    else:
+                        print(f"❌ Failed with {client_id}: {response.text}")
+                except Exception as e:
+                    print(f"Error with {client_id}: {str(e)}")
+                    continue
+            
+            # If all default clients fail, try with basic auth directly
+            print("All OAuth clients failed, trying basic auth...")
+            return self.try_basic_auth()
+            
+        except Exception as e:
+            print(f"Error with admin credentials: {str(e)}")
+            return False
+    
+    def try_basic_auth(self):
+        """Try using basic authentication for API calls"""
+        try:
+            print("Trying basic authentication...")
+            # Set up basic auth header for direct use
+            auth_header = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
+            self.access_token = f"Basic {auth_header}"
+            self.use_basic_auth = True
+            return True
+        except Exception as e:
+            print(f"Error setting up basic auth: {str(e)}")
+            return False
+    
+    def get_api_headers(self):
+        if hasattr(self, 'use_basic_auth') and self.use_basic_auth:
+            return {
+                'Authorization': self.access_token,  # This is already "Basic base64..."
+                'Content-Type': 'application/json'
+            }
+        else:
+            return {
+                'Authorization': f'Bearer {self.access_token}',
+                'Content-Type': 'application/json'
+            }
+    
+    def get_all_apis(self):
         if not self.access_token:
             if not self.get_access_token():
                 return []
@@ -153,75 +257,62 @@ class WSO2APIManager:
                         break
                     offset += limit
                 else:
-                    print(f"❌ Failed to get APIs: {response.status_code} - {response.text}")
+                    print(f"Failed to get APIs: {response.status_code}")
                     break
             
-            print(f"📊 Found {len(all_apis)} total APIs")
+            print(f"Found {len(all_apis)} APIs")
             return all_apis
-            
         except Exception as e:
-            print(f"❌ Error getting APIs: {str(e)}")
+            print(f"Error getting APIs: {str(e)}")
             return []
     
-    def get_api_details(self, api_id: str) -> Optional[Dict]:
-        """Get detailed information about a specific API"""
+    def get_api_details(self, api_id):
         try:
             url = f"{self.publisher_url}/apis/{api_id}"
             headers = self.get_api_headers()
-            
             response = self.session.get(url, headers=headers)
+            
             if response.status_code == 200:
                 return response.json()
-            else:
-                return None
-                
-        except Exception as e:
+            return None
+        except:
             return None
     
-    def get_api_mediation_policies(self, api_id: str) -> Dict:
-        """Get mediation policies for an API"""
+    def get_mediation_policies(self, api_id):
         try:
             url = f"{self.publisher_url}/apis/{api_id}/mediation-policies"
             headers = self.get_api_headers()
-            
             response = self.session.get(url, headers=headers)
+            
             if response.status_code == 200:
                 return response.json()
-            else:
-                return {'list': []}
-                
-        except Exception as e:
+            return {'list': []}
+        except:
             return {'list': []}
     
-    def get_operation_policy_content(self, api_id: str, policy_id: str) -> Optional[bytes]:
-        """Get the raw content of a specific operation policy"""
+    def get_operation_policy_content(self, api_id, policy_id):
         try:
             url = f"{self.publisher_url}/apis/{api_id}/operation-policies/{policy_id}/content"
             response = self.session.get(url, headers=self.get_api_headers())
             if response.status_code == 200:
                 return response.content
-            else:
-                return None
-        except Exception as e:
+            return None
+        except:
             return None
     
-    def download_mediation_policy(self, api_id: str, policy_id: str) -> Optional[str]:
-        """Download the content of a mediation policy"""
+    def download_mediation_policy(self, api_id, policy_id):
         try:
             url = f"{self.publisher_url}/apis/{api_id}/mediation-policies/{policy_id}/content"
             headers = self.get_api_headers()
-            
             response = self.session.get(url, headers=headers)
+            
             if response.status_code == 200:
                 return response.text
-            else:
-                return None
-                
-        except Exception as e:
+            return None
+        except:
             return None
     
-    def decompress_policy_content(self, compressed_content: bytes) -> Optional[str]:
-        """Decompress policy content (handles ZIP and GZIP)"""
+    def decompress_policy_content(self, compressed_content):
         try:
             with zipfile.ZipFile(io.BytesIO(compressed_content)) as zip_file:
                 file_list = zip_file.namelist()
@@ -236,48 +327,35 @@ class WSO2APIManager:
                         with zip_file.open(filename) as file:
                             return file.read().decode('utf-8')
                 
-                for filename in file_list:
-                    if filename.endswith('.yaml') or filename.endswith('.yml'):
-                        with zip_file.open(filename) as file:
-                            return file.read().decode('utf-8')
-                
                 if file_list:
                     with zip_file.open(file_list[0]) as file:
                         return file.read().decode('utf-8')
-                        
-        except zipfile.BadZipFile:
-            pass
-        except Exception:
+        except:
             pass
         
         try:
             decompressed = gzip.decompress(compressed_content)
             return decompressed.decode('utf-8')
-        except Exception:
+        except:
             pass
         
         try:
             return compressed_content.decode('utf-8')
-        except Exception:
+        except:
             pass
         
         return None
     
-    def download_operation_policy_content(self, api_id: str, policy_id: str) -> Optional[str]:
-        """Download and decompress operation policy content"""
+    def download_operation_policy_content(self, api_id, policy_id):
         try:
             compressed_content = self.get_operation_policy_content(api_id, policy_id)
-            
             if compressed_content:
                 return self.decompress_policy_content(compressed_content)
-            else:
-                return None
-                
-        except Exception as e:
+            return None
+        except:
             return None
     
-    def extract_roothost_from_policy_content(self, policy_content: str, policy_name: str = "") -> Tuple[str, str]:
-        """Extract roothost value from policy content and determine endpoint type"""
+    def extract_roothost_from_policy_content(self, policy_content):
         if not policy_content:
             return "", "no_content"
         
@@ -321,7 +399,6 @@ class WSO2APIManager:
                     r'rootHost:\s*([^\n\r]+)',
                     r'endpoint:\s*([^\n\r]+)',
                     r'host:\s*([^\n\r]+)',
-                    r'baseUrl:\s*([^\n\r]+)',
                 ]
                 
                 for pattern in yaml_patterns:
@@ -345,12 +422,10 @@ class WSO2APIManager:
                         break
             
             return roothost_value.strip(), endpoint_type
-            
-        except Exception as e:
+        except:
             return "", "extraction_error"
     
-    def analyze_api_for_endpoints_and_policies(self, api_id: str, api_name: str, api_version: str) -> List[Dict]:
-        """Analyze API for endpoints from both operation and mediation policies"""
+    def analyze_api(self, api_id, api_name, api_version):
         results = []
         
         try:
@@ -358,9 +433,9 @@ class WSO2APIManager:
             if not api_details:
                 return []
             
-            backend_endpoints = api_details.get('endpointConfig', {})
-            backend_url = None
+            backend_url = ""
             has_backend_conf = False
+            backend_endpoints = api_details.get('endpointConfig', {})
             if backend_endpoints:
                 production_endpoints = backend_endpoints.get('production_endpoints', {})
                 if production_endpoints:
@@ -377,7 +452,7 @@ class WSO2APIManager:
                     'api_context': api_details.get('context', ''),
                     'resource_path': 'N/A',
                     'resource_method': 'N/A',
-                    'current_endpoint': backend_url or '',
+                    'current_endpoint': backend_url,
                     'new_endpoint': '',
                     'endpoint_type': 'no_endpoint',
                     'api_type': 'no_operations_defined',
@@ -415,9 +490,7 @@ class WSO2APIManager:
                             policy_content = self.download_operation_policy_content(api_id, policy_id)
                             
                             if policy_content:
-                                roothost_value, endpoint_type = self.extract_roothost_from_policy_content(
-                                    policy_content, policy_name
-                                )
+                                roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content)
                                 
                                 if not has_policy_parameter and ('parameter' in policy_content.lower() or 'param' in policy_content.lower()):
                                     has_policy_parameter = True
@@ -445,7 +518,7 @@ class WSO2APIManager:
                                     'api_context': api_details.get('context', ''),
                                     'resource_path': resource_path,
                                     'resource_method': resource_method,
-                                    'current_endpoint': backend_url or '',
+                                    'current_endpoint': backend_url,
                                     'new_endpoint': roothost_value,
                                     'endpoint_type': final_endpoint_type,
                                     'api_type': api_type,
@@ -455,27 +528,9 @@ class WSO2APIManager:
                                     'has_backend_conf': has_backend_conf,
                                     'has_policy_parameter': has_policy_parameter
                                 })
-                            else:
-                                results.append({
-                                    'api_id': api_id,
-                                    'api_name': api_name,
-                                    'api_version': api_version,
-                                    'api_context': api_details.get('context', ''),
-                                    'resource_path': resource_path,
-                                    'resource_method': resource_method,
-                                    'current_endpoint': backend_url or '',
-                                    'new_endpoint': '',
-                                    'endpoint_type': 'operation_policy_no_content',
-                                    'api_type': 'operation_policy_based',
-                                    'policy_name': policy_name,
-                                    'policy_attribute': policy_attribute,
-                                    'operation_policy_count': operation_policy_count,
-                                    'has_backend_conf': has_backend_conf,
-                                    'has_policy_parameter': has_policy_parameter
-                                })
                 else:
-                    old_api_policies = self.get_api_mediation_policies(api_id)
-                    mediation_policy_count = len(old_api_policies.get('list', [])) if old_api_policies else 0
+                    old_api_policies = self.get_mediation_policies(api_id)
+                    mediation_policy_count = len(old_api_policies.get('list', []))
                     
                     has_mediation_policy_parameter = False
                     if old_api_policies and old_api_policies.get('list'):
@@ -489,16 +544,13 @@ class WSO2APIManager:
                         for policy in old_api_policies['list']:
                             policy_id = policy.get('id', '')
                             policy_name = policy.get('name', '')
-                            policy_type = policy.get('type', 'mediation')
                             policy_attribute = "mediation_policy"
                             
                             if policy_id:
                                 policy_content = self.download_mediation_policy(api_id, policy_id)
                                 
                                 if policy_content:
-                                    roothost_value, endpoint_type = self.extract_roothost_from_policy_content(
-                                        policy_content, policy_name
-                                    )
+                                    roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content)
                                     
                                     if 'parameter' in policy_content.lower() or 'param' in policy_content.lower():
                                         has_mediation_policy_parameter = True
@@ -526,28 +578,10 @@ class WSO2APIManager:
                                         'api_context': api_details.get('context', ''),
                                         'resource_path': resource_path,
                                         'resource_method': resource_method,
-                                        'current_endpoint': backend_url or '',
+                                        'current_endpoint': backend_url,
                                         'new_endpoint': roothost_value,
                                         'endpoint_type': final_endpoint_type,
                                         'api_type': api_type,
-                                        'policy_name': policy_name,
-                                        'policy_attribute': policy_attribute,
-                                        'operation_policy_count': mediation_policy_count,
-                                        'has_backend_conf': has_backend_conf,
-                                        'has_policy_parameter': has_mediation_policy_parameter
-                                    })
-                                else:
-                                    results.append({
-                                        'api_id': api_id,
-                                        'api_name': api_name,
-                                        'api_version': api_version,
-                                        'api_context': api_details.get('context', ''),
-                                        'resource_path': resource_path,
-                                        'resource_method': resource_method,
-                                        'current_endpoint': backend_url or '',
-                                        'new_endpoint': '',
-                                        'endpoint_type': 'mediation_policy_no_content',
-                                        'api_type': 'mediation_policy_based',
                                         'policy_name': policy_name,
                                         'policy_attribute': policy_attribute,
                                         'operation_policy_count': mediation_policy_count,
@@ -591,64 +625,41 @@ class WSO2APIManager:
                                 'has_backend_conf': has_backend_conf,
                                 'has_policy_parameter': False
                             })
-        
         except Exception as e:
-            results.append({
-                'api_id': api_id,
-                'api_name': api_name,
-                'api_version': api_version,
-                'api_context': api_details.get('context', ''),
-                'resource_path': 'ERROR',
-                'resource_method': 'ERROR',
-                'current_endpoint': '',
-                'new_endpoint': '',
-                'endpoint_type': 'analysis_error',
-                'api_type': 'error',
-                'policy_name': 'ERROR',
-                'policy_attribute': 'ERROR',
-                'operation_policy_count': 0,
-                'has_backend_conf': False,
-                'has_policy_parameter': False
-            })
+            print(f"Error analyzing API {api_id}: {str(e)}")
         
         return results
     
-    def process_all_apis_for_endpoints(self) -> List[Dict]:
-        """Process all APIs to extract endpoint information"""
+    def process_all_apis(self):
         try:
             if not self.get_access_token():
-                print("Failed to authenticate with provided credentials")
                 return []
             
             all_apis = self.get_all_apis()
-            
             if not all_apis:
-                print("No APIs found")
                 return []
             
             all_results = []
             total_apis = len(all_apis)
             
-            print(f"Processing {total_apis} APIs for endpoint analysis...")
+            print(f"Processing {total_apis} APIs...")
             
             for i, api in enumerate(all_apis, 1):
                 api_id = api.get('id', '')
                 api_name = api.get('name', 'Unknown')
                 api_version = api.get('version', '1.0.0')
                 
-                print(f"[{i}/{total_apis}] Processing: {api_name} v{api_version}")
+                print(f"[{i}/{total_apis}] Processing: {api_name}")
                 
-                api_results = self.analyze_api_for_endpoints_and_policies(api_id, api_name, api_version)
+                api_results = self.analyze_api(api_id, api_name, api_version)
                 all_results.extend(api_results)
             
             return all_results
-            
         except Exception as e:
             print(f"Error processing APIs: {str(e)}")
             return []
     
-    def save_to_csv(self, data: List[Dict], output_file: str):
-        """Save endpoint data to CSV file"""
+    def save_to_csv(self, data, output_file):
         try:
             if not data:
                 print("No data to save")
@@ -665,138 +676,52 @@ class WSO2APIManager:
                 writer.writeheader()
                 writer.writerows(data)
             
-            print(f"✅ Data saved to {output_file}")
-            
+            print(f"Data saved to {output_file}")
         except Exception as e:
-            print(f"❌ Error saving to CSV: {str(e)}")
-    
-    def generate_no_endpoints_report(self, data: List[Dict], output_file: str):
-        """Generate detailed report for APIs without endpoints"""
-        try:
-            no_endpoint_data = [d for d in data if d['endpoint_type'] == 'no_endpoint']
-            
-            api_summary = {}
-            for row in no_endpoint_data:
-                api_key = f"{row['api_name']}_v{row['api_version']}"
-                if api_key not in api_summary:
-                    api_summary[api_key] = {
-                        'api_id': row['api_id'],
-                        'api_name': row['api_name'],
-                        'api_version': row['api_version'],
-                        'api_context': row['api_context'],
-                        'total_resources': 0,
-                        'resources_without_endpoints': 0
-                    }
-                api_summary[api_key]['total_resources'] += 1
-                if row['endpoint_type'] == 'no_endpoint':
-                    api_summary[api_key]['resources_without_endpoints'] += 1
-            
-            fieldnames = ['api_id', 'api_name', 'api_version', 'api_context', 'total_resources', 'resources_without_endpoints']
-            
-            with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                writer.writeheader()
-                for api_data in api_summary.values():
-                    writer.writerow(api_data)
-            
-            print(f"✅ No endpoints report saved to {output_file}")
-            
-        except Exception as e:
-            print(f"❌ Error generating no endpoints report: {str(e)}")
-
-def print_summary_statistics(data: List[Dict], output_file: str):
-    """Print summary statistics for the extracted data"""
-    operation_policies = [d for d in data if d.get('policy_attribute') == 'operation_policy']
-    mediation_policies = [d for d in data if d.get('policy_attribute') == 'mediation_policy']
-    
-    policy_hardcoded = [d for d in data if 'hardcoded' in d['endpoint_type']]
-    policy_dynamic = [d for d in data if 'dynamic' in d['endpoint_type']]
-    policy_yaml = [d for d in data if 'yaml' in d['endpoint_type']]
-    operation_parameters = [d for d in data if 'parameter' in d['endpoint_type']]
-    backend_config = [d for d in data if d['endpoint_type'] == 'backend_config']
-    no_endpoints = [d for d in data if d['endpoint_type'] == 'no_endpoint']
-    
-    apis_with_backend_conf = [d for d in data if d['has_backend_conf'] == True]
-    apis_with_policy_params = [d for d in data if d['has_policy_parameter'] == True]
-    
-    print(f"\n📊 EXTRACTION SUMMARY:")
-    print(f"=" * 50)
-    print(f"Total API resources: {len(data)}")
-    print(f"Unique APIs processed: {len(set(d['api_id'] for d in data))}")
-    print(f"Data saved to: {output_file}")
-    
-    print(f"\n📋 POLICY ATTRIBUTES:")
-    print(f"Operation policies (NEW APIs): {len(operation_policies)}")
-    print(f"Mediation policies (OLD APIs): {len(mediation_policies)}")
-    
-    print(f"\n🔗 ENDPOINT TYPES:")
-    print(f"Policy hardcoded URLs: {len(policy_hardcoded)} - Direct URLs in policies")
-    print(f"Policy dynamic templates: {len(policy_dynamic)} - Templates like {{{{rootHost}}}}")
-    print(f"Policy YAML parameters: {len(policy_yaml)} - YAML parameter values")
-    print(f"Operation parameters: {len(operation_parameters)} - Policy parameters")
-    print(f"Backend configuration: {len(backend_config)} - WSO2 backend endpoints")
-    print(f"No endpoints found: {len(no_endpoints)} - APIs without endpoints")
-    
-    print(f"\n⚙️ CONFIGURATION STATUS:")
-    print(f"APIs with backend configuration: {len(set(d['api_id'] for d in apis_with_backend_conf))}")
-    print(f"APIs with policy parameters: {len(set(d['api_id'] for d in apis_with_policy_params))}")
-    
-    apis_with_endpoints = len(set(d['api_id'] for d in data if d['new_endpoint']))
-    apis_without_endpoints = len(set(d['api_id'] for d in data if not d['new_endpoint']))
-    print(f"\n📈 ENDPOINT COVERAGE:")
-    print(f"APIs with endpoints found: {apis_with_endpoints}")
-    print(f"APIs without endpoints: {apis_without_endpoints}")
-    
-    if policy_hardcoded:
-        print(f"\n🔍 SAMPLE HARDCODED ENDPOINTS:")
-        unique_endpoints = list(set(d['new_endpoint'] for d in policy_hardcoded if d['new_endpoint']))[:5]
-        for i, endpoint in enumerate(unique_endpoints, 1):
-            count = len([d for d in policy_hardcoded if d['new_endpoint'] == endpoint])
-            print(f"  {i}. {endpoint} (used by {count} resources)")
+            print(f"Error saving CSV: {str(e)}")
 
 def main():
-    """Main function to run the WSO2 policy extraction"""
-    print("🚀 WSO2 API Manager 4.2 - Policy Endpoint Extractor")
-    print("=" * 60)
-    
-    config_file = "policy_config.json"
+    print("WSO2 API Manager 4.2 - Policy Endpoint Extractor")
+    print("=" * 50)
     
     if len(sys.argv) > 1 and sys.argv[1] == "--create-config":
-        create_default_config_file(config_file)
+        create_config()
+        return
+    
+    if not os.path.exists("policy_config.json"):
+        print("Config file not found. Creating default...")
+        create_config()
+        print("Please update policy_config.json and run again")
         return
     
     try:
-        wso2_client = WSO2APIManager(config_file)
+        client = WSO2APIManager()
         
-        print(f"\n📡 Connecting to: {wso2_client.base_url}")
-        print(f"👤 Username: {wso2_client.username}")
-        print(f"🔒 SSL Verification: {wso2_client.verify_ssl}")
+        print(f"Connecting to: {client.base_url}")
+        print(f"Username: {client.username}")
         
-        data = wso2_client.process_all_apis_for_endpoints()
+        data = client.process_all_apis()
         
         if data:
-            output_file = wso2_client.config.get('output_csv', 'wso2_policy_endpoints.csv')
-            wso2_client.save_to_csv(data, output_file)
+            output_file = client.config.get('output_csv', 'wso2_policy_endpoints.csv')
+            client.save_to_csv(data, output_file)
             
-            print_summary_statistics(data, output_file)
+            print(f"\nSUMMARY:")
+            print(f"Total records: {len(data)}")
+            print(f"Unique APIs: {len(set(d['api_id'] for d in data))}")
             
-            no_endpoints = [d for d in data if d['endpoint_type'] == 'no_endpoint']
-            if no_endpoints:
-                no_endpoint_file = output_file.replace('.csv', '_no_endpoints.csv')
-                wso2_client.generate_no_endpoints_report(data, no_endpoint_file)
-                print(f"\n📄 No endpoints report: {no_endpoint_file}")
+            operation_policies = [d for d in data if d.get('policy_attribute') == 'operation_policy']
+            mediation_policies = [d for d in data if d.get('policy_attribute') == 'mediation_policy']
             
-            print(f"\n✅ Script completed successfully!")
-            print(f"📁 Check '{output_file}' for detailed results.")
+            print(f"Operation policies: {len(operation_policies)}")
+            print(f"Mediation policies: {len(mediation_policies)}")
+            print(f"Output file: {output_file}")
+            print("\nCompleted successfully!")
         else:
-            print("\n❌ No data extracted. Check credentials and WSO2 connectivity.")
-            
+            print("No data extracted. Check credentials and connectivity.")
+    
     except Exception as e:
-        print(f"\n❌ Script failed with error: {str(e)}")
-        if "config file" in str(e).lower():
-            print("\nTo create a sample config file, run:")
-            print("python wso2_extractor.py --create-config")
-        sys.exit(1)
+        print(f"Script failed: {str(e)}")
 
 if __name__ == "__main__":
     main()
