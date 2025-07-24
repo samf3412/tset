@@ -471,9 +471,9 @@ class WSO2APIManager:
                                 
                                 if roothost_value:
                                     # Determine API type with correct endpoint types
-                                    if 'roothost' in endpoint_type.lower() and 'yaml' in endpoint_type.lower():
+                                    if 'yaml' in endpoint_type.lower() and 'roothost' in endpoint_type.lower():
                                         api_type = "operation_policy_based"
-                                        final_endpoint_type = "operation_policy_yaml_parameter"
+                                        final_endpoint_type = "operation_parameter"  # NEW APIs - rootHost from api.yaml
                                     elif 'template' in endpoint_type.lower() or 'dynamic' in endpoint_type.lower():
                                         api_type = "operation_policy_based"
                                         final_endpoint_type = "operation_policy_dynamic_template"
@@ -482,7 +482,7 @@ class WSO2APIManager:
                                         final_endpoint_type = "operation_policy_hardcoded_url"
                                     else:
                                         api_type = "operation_policy_based"
-                                        final_endpoint_type = "operation_policy_unknown"
+                                        final_endpoint_type = "operation_parameter"  # Default for NEW APIs
                                     
                                     results.append({
                                         'api_id': api_id,
@@ -523,22 +523,9 @@ class WSO2APIManager:
                                     roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content, policy_name)
                                     
                                     if roothost_value:
-                                        # Determine API type for mediation policies with correct endpoint types
-                                        if 'j2' in endpoint_type.lower() and 'roothost' in endpoint_type.lower():
-                                            api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_j2_roothost"
-                                        elif 'xml' in endpoint_type.lower() and 'roothost' in endpoint_type.lower():
-                                            api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_xml_roothost"
-                                        elif 'template' in endpoint_type.lower():
-                                            api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_dynamic_template"
-                                        elif 'hardcoded' in endpoint_type.lower():
-                                            api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_hardcoded_url"
-                                        else:
-                                            api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_unknown"
+                                        # Determine API type for mediation policies - OLD APIs
+                                        api_type = "mediation_policy_based"
+                                        final_endpoint_type = "operation_policy_hardcoded_url"  # OLD APIs - all mediation policies
                                         
                                         results.append({
                                             'api_id': api_id,
@@ -567,7 +554,7 @@ class WSO2APIManager:
                 
                 # If still no endpoint found, use backend or mark as no endpoint
                 if not found_endpoint:
-                    print(f"    No policies with rootHost found, using backend or no endpoint")
+                    print(f"    No policies with rootHost found, checking backend configuration")
                     if backend_url:
                         results.append({
                             'api_id': api_id,
@@ -578,7 +565,7 @@ class WSO2APIManager:
                             'resource_method': resource_method,
                             'current_endpoint': backend_url,
                             'new_endpoint': backend_url,
-                            'endpoint_type': 'backend_config',
+                            'endpoint_type': 'backend_config',  # WSO2 production endpoint
                             'api_type': 'backend_endpoint_based',
                             'policy_name': 'N/A',
                             'policy_attribute': 'N/A',
@@ -596,7 +583,7 @@ class WSO2APIManager:
                             'resource_method': resource_method,
                             'current_endpoint': '',
                             'new_endpoint': '',
-                            'endpoint_type': 'no_endpoint',
+                            'endpoint_type': 'no_endpoint',  # No endpoint or rootHost found
                             'api_type': 'no_endpoint_configured',
                             'policy_name': 'N/A',
                             'policy_attribute': 'N/A',
