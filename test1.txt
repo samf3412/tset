@@ -128,6 +128,20 @@ class WSO2APIManager:
         except Exception as e:
             return {'list': []}
     
+    def get_operation_policies(self, api_id):
+        """Get operation-level policies for an API"""
+        try:
+            url = f"{self.publisher_url}/apis/{api_id}/operation-policies"
+            response = self.session.get(url, headers=self.get_api_headers())
+            if response.status_code == 200:
+                return response.json().get('list', [])
+            else:
+                print(f"Failed to fetch operation policies for {api_id}: {response.status_code}")
+                return []
+        except Exception as e:
+            print(f"Error fetching operation policies for {api_id}: {str(e)}")
+            return []
+    
     def get_operation_policy_content(self, api_id, policy_id):
         try:
             url = f"{self.publisher_url}/apis/{api_id}/operation-policies/{policy_id}/content"
@@ -151,48 +165,76 @@ class WSO2APIManager:
             return None
     
     def decompress_policy_content(self, compressed_content):
+        """Decompress policy content (handles ZIP and GZIP)"""
+        if not compressed_content:
+            return None
+            
+        # Try ZIP decompression first
         try:
-            with zipfile.ZipFile(io.BytesIO(compressed_content)) as zip_file:
+            with zipfile.ZipFile(io.BytesIO(compressed_content), 'r') as zip_file:
                 file_list = zip_file.namelist()
+                print(f"ZIP contains: {file_list}")
                 
-                # Look for YAML files first (contains parameters)
-                for filename in file_list:
-                    if filename.endswith('.yaml') or filename.endswith('.yml'):
-                        with zip_file.open(filename) as file:
-                            content = file.read().decode('utf-8')
-                            print(f"Found YAML file: {filename}")
-                            return content
-                
-                # Then look for j2 files
+                # Look for J2 files first (most important for mediation policies)
                 for filename in file_list:
                     if filename.endswith('.j2'):
-                        with zip_file.open(filename) as file:
-                            return file.read().decode('utf-8')
+                        try:
+                            with zip_file.open(filename) as file:
+                                j2_content = file.read().decode('utf-8')
+                                print(f"Extracted J2 template from {filename}")
+                                return j2_content
+                        except:
+                            pass
                 
-                # Then XML files
+                # Then look for XML files
                 for filename in file_list:
                     if filename.endswith('.xml'):
-                        with zip_file.open(filename) as file:
-                            return file.read().decode('utf-8')
+                        try:
+                            with zip_file.open(filename) as file:
+                                xml_content = file.read().decode('utf-8')
+                                print(f"Extracted XML from {filename}")
+                                return xml_content
+                        except:
+                            pass
                 
-                # Get first file if no specific types found
+                # Then YAML files
+                for filename in file_list:
+                    if filename.endswith('.yaml') or filename.endswith('.yml'):
+                        try:
+                            with zip_file.open(filename) as file:
+                                yaml_content = file.read().decode('utf-8')
+                                print(f"Extracted YAML from {filename}")
+                                return yaml_content
+                        except:
+                            pass
+                
+                # If no specific files, get the first file
                 if file_list:
                     with zip_file.open(file_list[0]) as file:
-                        return file.read().decode('utf-8')
+                        content = file.read().decode('utf-8')
+                        print(f"Extracted content from {file_list[0]}")
+                        return content
+                        
         except zipfile.BadZipFile:
-            pass
+            pass  # Not a ZIP file, try GZIP
         except Exception as e:
             print(f"ZIP extraction error: {str(e)}")
         
+        # Try GZIP decompression
         try:
             decompressed = gzip.decompress(compressed_content)
-            return decompressed.decode('utf-8')
-        except Exception:
-            pass
+            content = decompressed.decode('utf-8')
+            print("Successfully decompressed with GZIP")
+            return content
+        except:
+            pass  # Not GZIP either
         
+        # Try as plain text
         try:
-            return compressed_content.decode('utf-8')
-        except Exception:
+            content = compressed_content.decode('utf-8')
+            print("Content is plain text")
+            return content
+        except:
             pass
         
         return None
@@ -428,19 +470,19 @@ class WSO2APIManager:
                                 roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content, policy_name)
                                 
                                 if roothost_value:
-                                    # Determine API type
-                                    if 'roothost' in endpoint_type.lower():
+                                    # Determine API type with correct endpoint types
+                                    if 'roothost' in endpoint_type.lower() and 'yaml' in endpoint_type.lower():
                                         api_type = "operation_policy_based"
-                                        final_endpoint_type = "operation_policy_roothost"
-                                    elif 'template' in endpoint_type.lower():
+                                        final_endpoint_type = "operation_policy_yaml_parameter"
+                                    elif 'template' in endpoint_type.lower() or 'dynamic' in endpoint_type.lower():
                                         api_type = "operation_policy_based"
-                                        final_endpoint_type = "operation_policy_dynamic"
+                                        final_endpoint_type = "operation_policy_dynamic_template"
                                     elif 'hardcoded' in endpoint_type.lower():
                                         api_type = "operation_policy_based"
-                                        final_endpoint_type = "operation_policy_hardcoded"
+                                        final_endpoint_type = "operation_policy_hardcoded_url"
                                     else:
                                         api_type = "operation_policy_based"
-                                        final_endpoint_type = endpoint_type
+                                        final_endpoint_type = "operation_policy_unknown"
                                     
                                     results.append({
                                         'api_id': api_id,
@@ -481,22 +523,22 @@ class WSO2APIManager:
                                     roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content, policy_name)
                                     
                                     if roothost_value:
-                                        # Determine API type for mediation policies
-                                        if 'j2' in endpoint_type.lower():
+                                        # Determine API type for mediation policies with correct endpoint types
+                                        if 'j2' in endpoint_type.lower() and 'roothost' in endpoint_type.lower():
                                             api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_j2"
-                                        elif 'xml' in endpoint_type.lower():
+                                            final_endpoint_type = "mediation_policy_j2_roothost"
+                                        elif 'xml' in endpoint_type.lower() and 'roothost' in endpoint_type.lower():
                                             api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_xml"
+                                            final_endpoint_type = "mediation_policy_xml_roothost"
                                         elif 'template' in endpoint_type.lower():
                                             api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_template"
+                                            final_endpoint_type = "mediation_policy_dynamic_template"
                                         elif 'hardcoded' in endpoint_type.lower():
                                             api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_hardcoded"
+                                            final_endpoint_type = "mediation_policy_hardcoded_url"
                                         else:
                                             api_type = "mediation_policy_based"
-                                            final_endpoint_type = endpoint_type
+                                            final_endpoint_type = "mediation_policy_unknown"
                                         
                                         results.append({
                                             'api_id': api_id,
