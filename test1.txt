@@ -156,22 +156,86 @@ class WSO2APIManager:
     def get_token_with_admin_credentials(self):
         """Get token using admin username/password directly"""
         try:
-            print("Trying default OAuth clients...")
-            # Try using the admin credentials directly with known clients
-            default_clients = [
-                ('admin', 'admin'),  # Default admin client
-                ('apim_devportal', 'apim_devportal'),  # Default devportal client
-                ('apim_publisher', 'apim_publisher'),  # Default publisher client
-                ('wso2carbon', 'wso2carbon'),  # Another common default
-                ('client', 'client'),  # Simple default
+            print("Trying direct admin authentication methods...")
+            
+            # Method 1: Try with admin user as OAuth client
+            print("Method 1: Using admin credentials as OAuth client...")
+            if self.try_admin_as_oauth_client():
+                return True
+            
+            # Method 2: Try getting client credentials from Carbon Console
+            print("Method 2: Trying to get existing client credentials...")
+            if self.try_existing_clients():
+                return True
+            
+            # Method 3: Try with default service provider
+            print("Method 3: Trying default service providers...")
+            if self.try_service_providers():
+                return True
+            
+            print("All OAuth methods failed, falling back to basic auth...")
+            return self.try_basic_auth()
+            
+        except Exception as e:
+            print(f"Error with admin credentials: {str(e)}")
+            return False
+    
+    def try_admin_as_oauth_client(self):
+        """Try using admin username/password as direct OAuth client"""
+        try:
+            # In some WSO2 setups, admin user can be used directly
+            token_url = f"{self.base_url}/oauth2/token"
+            
+            # Try without client credentials (direct admin)
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded'
+            }
+            data = {
+                'grant_type': 'password',
+                'username': self.username,
+                'password': self.password,
+                'scope': 'apim:api_view apim:api_create apim:api_publish'
+            }
+            
+            response = self.session.post(token_url, headers=headers, data=data)
+            if response.status_code == 200:
+                token_data = response.json()
+                self.access_token = token_data.get('access_token')
+                print("✅ Direct admin authentication successful")
+                return True
+            else:
+                print(f"❌ Direct admin auth failed: {response.status_code}")
+                return False
+                
+        except Exception as e:
+            print(f"Error with direct admin auth: {str(e)}")
+            return False
+    
+    def try_existing_clients(self):
+        """Try to use existing OAuth clients"""
+        try:
+            # Get list of existing applications via Carbon Admin Services
+            admin_headers = {
+                'Authorization': f'Basic {base64.b64encode(f"{self.username}:{self.password}".encode()).decode()}',
+                'Content-Type': 'application/soap+xml'
+            }
+            
+            # Try to get existing OAuth apps
+            apps_url = f"{self.base_url}/services/OAuthAdminService"
+            
+            # This is a simplified approach - in real scenarios you'd need SOAP calls
+            # For now, try known application patterns
+            known_apps = [
+                ('admin_PolicyExtractor', 'admin_PolicyExtractor'),
+                ('WSO2_API_Manager', 'WSO2_API_Manager'),
+                ('DefaultApplication_PRODUCTION', 'DefaultApplication_PRODUCTION'),
+                ('carbon_app', 'carbon_app')
             ]
             
             token_url = f"{self.base_url}/oauth2/token"
             
-            for client_id, client_secret in default_clients:
-                print(f"Trying client: {client_id}")
+            for client_id, client_secret in known_apps:
                 auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-                
                 headers = {
                     'Authorization': f'Basic {auth_header}',
                     'Content-Type': 'application/x-www-form-urlencoded'
@@ -183,27 +247,68 @@ class WSO2APIManager:
                     'scope': 'apim:api_view apim:api_create apim:api_publish'
                 }
                 
-                try:
-                    response = self.session.post(token_url, headers=headers, data=data)
-                    print(f"Response for {client_id}: {response.status_code}")
+                response = self.session.post(token_url, headers=headers, data=data)
+                if response.status_code == 200:
+                    token_data = response.json()
+                    self.access_token = token_data.get('access_token')
+                    print(f"✅ Success with existing client: {client_id}")
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error trying existing clients: {str(e)}")
+            return False
+    
+    def try_service_providers(self):
+        """Try using service provider applications"""
+        try:
+            # Service providers that might exist in WSO2
+            service_providers = [
+                ('apim_publisher', 'apim_publisher'),
+                ('apim_devportal', 'apim_devportal'), 
+                ('apim_admin', 'apim_admin'),
+                ('wso2am_api_publisher', 'wso2am_api_publisher'),
+                ('wso2am_admin_portal', 'wso2am_admin_portal')
+            ]
+            
+            token_url = f"{self.base_url}/oauth2/token"
+            
+            for sp_client_id, sp_client_secret in service_providers:
+                print(f"Trying service provider: {sp_client_id}")
+                auth_header = base64.b64encode(f"{sp_client_id}:{sp_client_secret}".encode()).decode()
+                
+                headers = {
+                    'Authorization': f'Basic {auth_header}',
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+                
+                # Try both client_credentials and password grants
+                for grant_type in ['client_credentials', 'password']:
+                    data = {
+                        'grant_type': grant_type,
+                        'scope': 'apim:api_view apim:api_create apim:api_publish'
+                    }
                     
+                    if grant_type == 'password':
+                        data.update({
+                            'username': self.username,
+                            'password': self.password
+                        })
+                    
+                    response = self.session.post(token_url, headers=headers, data=data)
                     if response.status_code == 200:
                         token_data = response.json()
                         self.access_token = token_data.get('access_token')
-                        print(f"✅ Access token obtained using {client_id} client")
+                        print(f"✅ Success with service provider {sp_client_id} using {grant_type}")
                         return True
                     else:
-                        print(f"❌ Failed with {client_id}: {response.text}")
-                except Exception as e:
-                    print(f"Error with {client_id}: {str(e)}")
-                    continue
+                        print(f"❌ Failed {sp_client_id} with {grant_type}: {response.status_code}")
             
-            # If all default clients fail, try with basic auth directly
-            print("All OAuth clients failed, trying basic auth...")
-            return self.try_basic_auth()
+            return False
             
         except Exception as e:
-            print(f"Error with admin credentials: {str(e)}")
+            print(f"Error with service providers: {str(e)}")
             return False
     
     def try_basic_auth(self):
@@ -363,42 +468,74 @@ class WSO2APIManager:
             roothost_value = ""
             endpoint_type = "unknown"
             
-            url_patterns = [
-                r'<address\s+uri=["\']([^"\']+)["\']',
-                r'<endpoint[^>]*>.*?<address[^>]+uri=["\']([^"\']+)["\']',
-                r'<property[^>]*value=["\']([^"\']*https?://[^"\']+)["\']',
-                r'https?://[^\s<>"\']+',
+            # Pattern 1: Your specific rootHost property format
+            # <property name="rootHost" scope="default" type="STRING" value="{{rootHost}}"/>
+            roothost_property_patterns = [
+                r'<property[^>]*name=["\']rootHost["\'][^>]*value=["\']([^"\']+)["\']',
+                r'<property[^>]*name=["\']roothost["\'][^>]*value=["\']([^"\']+)["\']',
+                r'<property[^>]*name=["\']root_host["\'][^>]*value=["\']([^"\']+)["\']',
             ]
             
-            for pattern in url_patterns:
+            for pattern in roothost_property_patterns:
                 matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
                 if matches:
-                    roothost_value = matches[0] if isinstance(matches[0], str) else str(matches[0])
-                    endpoint_type = "operation_policy_hardcoded_url"
+                    roothost_value = matches[0]
+                    endpoint_type = "operation_policy_roothost_property"
+                    print(f"Found rootHost property: {roothost_value}")
                     break
             
+            # Pattern 2: Standard hardcoded URLs in address elements
+            if not roothost_value:
+                url_patterns = [
+                    r'<address\s+uri=["\']([^"\']+)["\']',
+                    r'<endpoint[^>]*>.*?<address[^>]+uri=["\']([^"\']+)["\']',
+                    r'<property[^>]*value=["\']([^"\']*https?://[^"\']+)["\']',
+                    r'https?://[^\s<>"\']+',
+                ]
+                
+                for pattern in url_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
+                    if matches:
+                        roothost_value = matches[0] if isinstance(matches[0], str) else str(matches[0])
+                        endpoint_type = "operation_policy_hardcoded_url"
+                        break
+            
+            # Pattern 3: Template variables like {{rootHost}}, ${rootHost}
             if not roothost_value:
                 template_patterns = [
-                    r'\{\{([^}]+)\}\}',
-                    r'\$\{([^}]+)\}',
+                    r'\{\{([^}]*[Rr]oot[Hh]ost[^}]*)\}\}',  # {{rootHost}} variations
+                    r'\{\{([^}]*[Hh]ost[^}]*)\}\}',         # {{host}} variations
+                    r'\{\{([^}]*[Ee]ndpoint[^}]*)\}\}',     # {{endpoint}} variations
+                    r'\$\{([^}]*[Rr]oot[Hh]ost[^}]*)\}',   # ${rootHost} variations
+                    r'\$\{([^}]*[Hh]ost[^}]*)\}',          # ${host} variations
+                    r'\$\{([^}]*[Ee]ndpoint[^}]*)\}',      # ${endpoint} variations
                 ]
                 
                 for pattern in template_patterns:
-                    matches = re.findall(pattern, policy_content)
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE)
                     if matches:
-                        for match in matches:
-                            if 'roothost' in match.lower() or 'host' in match.lower() or 'endpoint' in match.lower():
+                        match = matches[0]
+                        if 'roothost' in match.lower() or 'host' in match.lower() or 'endpoint' in match.lower():
+                            # Preserve the original template format
+                            if '{{' in policy_content:
                                 roothost_value = f"{{{{{match}}}}}"
-                                endpoint_type = "operation_policy_dynamic_template"
-                                break
-                        if roothost_value:
+                            else:
+                                roothost_value = f"${{{match}}}"
+                            endpoint_type = "operation_policy_dynamic_template"
+                            print(f"Found template variable: {roothost_value}")
                             break
+                    if roothost_value:
+                        break
             
+            # Pattern 4: YAML parameter references
             if not roothost_value and ('yaml' in policy_content.lower() or 'parameters:' in policy_content):
                 yaml_patterns = [
                     r'rootHost:\s*([^\n\r]+)',
+                    r'root_host:\s*([^\n\r]+)',
                     r'endpoint:\s*([^\n\r]+)',
                     r'host:\s*([^\n\r]+)',
+                    r'baseUrl:\s*([^\n\r]+)',
+                    r'base_url:\s*([^\n\r]+)',
                 ]
                 
                 for pattern in yaml_patterns:
@@ -406,12 +543,15 @@ class WSO2APIManager:
                     if matches:
                         roothost_value = matches[0].strip()
                         endpoint_type = "operation_policy_yaml_parameter"
+                        print(f"Found YAML parameter: {roothost_value}")
                         break
             
+            # Pattern 5: XML parameter elements
             if not roothost_value:
                 param_patterns = [
-                    r'<parameter[^>]*name=["\']([^"\']*host[^"\']*)["\'][^>]*>([^<]+)',
-                    r'<parameter[^>]*name=["\']([^"\']*endpoint[^"\']*)["\'][^>]*>([^<]+)',
+                    r'<parameter[^>]*name=["\']([^"\']*[Rr]oot[Hh]ost[^"\']*)["\'][^>]*>([^<]+)',
+                    r'<parameter[^>]*name=["\']([^"\']*[Hh]ost[^"\']*)["\'][^>]*>([^<]+)',
+                    r'<parameter[^>]*name=["\']([^"\']*[Ee]ndpoint[^"\']*)["\'][^>]*>([^<]+)',
                 ]
                 
                 for pattern in param_patterns:
@@ -419,10 +559,29 @@ class WSO2APIManager:
                     if matches:
                         roothost_value = matches[0][1] if len(matches[0]) > 1 else str(matches[0])
                         endpoint_type = "operation_parameter"
+                        print(f"Found parameter: {roothost_value}")
+                        break
+            
+            # Pattern 6: Look for any property with URI-like values
+            if not roothost_value:
+                generic_patterns = [
+                    r'<property[^>]*value=["\']([^"\']*\{\{[^}]*\}\}[^"\']*)["\']',  # Any {{}} in properties
+                    r'<property[^>]*value=["\']([^"\']*\$\{[^}]*\}[^"\']*)["\']',   # Any ${} in properties
+                    r'value=["\']([^"\']*https?://[^"\']*)["\']',                   # Any HTTP URLs
+                ]
+                
+                for pattern in generic_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE)
+                    if matches:
+                        roothost_value = matches[0]
+                        endpoint_type = "operation_policy_generic_property"
+                        print(f"Found generic property: {roothost_value}")
                         break
             
             return roothost_value.strip(), endpoint_type
-        except:
+            
+        except Exception as e:
+            print(f"Error extracting roothost: {str(e)}")
             return "", "extraction_error"
     
     def analyze_api(self, api_id, api_name, api_version):
@@ -501,15 +660,21 @@ class WSO2APIManager:
                                 elif 'parameter' in endpoint_type:
                                     api_type = "operation_parameter_based"
                                     final_endpoint_type = "operation_parameter"
-                                elif 'dynamic' in endpoint_type:
+                                elif 'dynamic' in endpoint_type or 'template' in endpoint_type:
                                     api_type = "operation_policy_based"
                                     final_endpoint_type = "operation_policy_dynamic"
                                 elif 'yaml' in endpoint_type:
                                     api_type = "operation_policy_based"
                                     final_endpoint_type = "operation_policy_yaml"
+                                elif 'roothost' in endpoint_type:
+                                    api_type = "operation_policy_based"
+                                    final_endpoint_type = "operation_policy_roothost"
                                 else:
                                     api_type = "operation_policy_based"
                                     final_endpoint_type = "operation_policy_unknown"
+                                
+                                # Use extracted endpoint for both current and new endpoint
+                                extracted_endpoint = roothost_value if roothost_value else backend_url
                                 
                                 results.append({
                                     'api_id': api_id,
@@ -518,8 +683,8 @@ class WSO2APIManager:
                                     'api_context': api_details.get('context', ''),
                                     'resource_path': resource_path,
                                     'resource_method': resource_method,
-                                    'current_endpoint': backend_url,
-                                    'new_endpoint': roothost_value,
+                                    'current_endpoint': extracted_endpoint,
+                                    'new_endpoint': extracted_endpoint,
                                     'endpoint_type': final_endpoint_type,
                                     'api_type': api_type,
                                     'policy_name': policy_name,
@@ -561,15 +726,21 @@ class WSO2APIManager:
                                     elif 'parameter' in endpoint_type:
                                         api_type = "mediation_parameter_based"
                                         final_endpoint_type = "mediation_parameter"
-                                    elif 'dynamic' in endpoint_type:
+                                    elif 'dynamic' in endpoint_type or 'template' in endpoint_type:
                                         api_type = "mediation_policy_based"
                                         final_endpoint_type = "mediation_policy_dynamic"
                                     elif 'yaml' in endpoint_type:
                                         api_type = "mediation_policy_based"
                                         final_endpoint_type = "mediation_policy_yaml"
+                                    elif 'roothost' in endpoint_type:
+                                        api_type = "mediation_policy_based"
+                                        final_endpoint_type = "mediation_policy_roothost"
                                     else:
                                         api_type = "mediation_policy_based"
                                         final_endpoint_type = "mediation_policy_unknown"
+                                    
+                                    # Use extracted endpoint for both current and new endpoint
+                                    extracted_endpoint = roothost_value if roothost_value else backend_url
                                     
                                     results.append({
                                         'api_id': api_id,
@@ -578,8 +749,27 @@ class WSO2APIManager:
                                         'api_context': api_details.get('context', ''),
                                         'resource_path': resource_path,
                                         'resource_method': resource_method,
+                                        'current_endpoint': extracted_endpoint,
+                                        'new_endpoint': extracted_endpoint,
+                                else:
+                                    # No mediation policy content found
+                                    results.append({
+                                        'api_id': api_id,
+                                        'api_name': api_name,
+                                        'api_version': api_version,
+                                        'api_context': api_details.get('context', ''),
+                                        'resource_path': resource_path,
+                                        'resource_method': resource_method,
                                         'current_endpoint': backend_url,
-                                        'new_endpoint': roothost_value,
+                                        'new_endpoint': backend_url,
+                                        'endpoint_type': 'mediation_policy_no_content',
+                                        'api_type': 'mediation_policy_based',
+                                        'policy_name': policy_name,
+                                        'policy_attribute': policy_attribute,
+                                        'operation_policy_count': mediation_policy_count,
+                                        'has_backend_conf': has_backend_conf,
+                                        'has_policy_parameter': has_mediation_policy_parameter
+                                    })
                                         'endpoint_type': final_endpoint_type,
                                         'api_type': api_type,
                                         'policy_name': policy_name,
