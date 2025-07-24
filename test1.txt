@@ -1,30 +1,105 @@
+#!/usr/bin/env python3
+"""
+WSO2 API Manager 4.2 - Policy Endpoint Extractor
+Clean version without any errors
+"""
+
 import requests
 import json
 import base64
 import os
-import xml.etree.ElementTree as ET
 from datetime import datetime
 import urllib3
+import zipfile
+import gzip
+import io
+import csv
+import sys
+from typing import Optional, Dict, List, Tuple
+import re
 
-# Disable SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+def create_default_config_file(config_file: str):
+    """Create a default configuration file"""
+    default_config = {
+        "publisher_url": "https://localhost:9443",
+        "username": "admin",
+        "password": "admin",
+        "verify_ssl": False,
+        "output_csv": "wso2_policy_endpoints.csv",
+        "description": "WSO2 API Manager configuration file",
+        "created_date": datetime.now().isoformat(),
+        "instructions": {
+            "publisher_url": "Base URL of your WSO2 API Manager instance",
+            "username": "WSO2 username with publisher/admin access",
+            "password": "WSO2 password",
+            "verify_ssl": "Set to false for self-signed certificates",
+            "output_csv": "Output CSV filename"
+        }
+    }
+    
+    try:
+        with open(config_file, 'w', encoding='utf-8') as f:
+            json.dump(default_config, f, indent=4, ensure_ascii=False)
+        print(f"✅ Sample configuration file created: {config_file}")
+        print("📝 Please update the configuration with your WSO2 details before running the extractor.")
+    except Exception as e:
+        print(f"❌ Error creating config file: {str(e)}")
+        sys.exit(1)
 
 class WSO2APIManager:
-    def __init__(self, base_url, username, password):
-        self.base_url = base_url.rstrip('/')
-        self.username = username
-        self.password = password
+    def __init__(self, config_file: str = "policy_config.json"):
+        """Initialize WSO2 API Manager client"""
+        self.config = self.load_config(config_file)
+        self.base_url = self.config['publisher_url'].rstrip('/')
+        self.username = self.config['username']
+        self.password = self.config['password']
+        self.verify_ssl = self.config.get('verify_ssl', True)
+        
         self.access_token = None
         self.session = requests.Session()
-        self.session.verify = False
+        self.session.verify = self.verify_ssl
         
-    def get_access_token(self):
+        if not self.verify_ssl:
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        self.publisher_url = f"{self.base_url}/api/am/publisher/v4"
+        
+    def load_config(self, config_file: str) -> Dict:
+        """Load configuration from JSON file"""
+        try:
+            if not os.path.exists(config_file):
+                print(f"Configuration file '{config_file}' not found. Creating default configuration...")
+                create_default_config_file(config_file)
+                sys.exit(1)
+            
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            required_fields = ['publisher_url', 'username', 'password']
+            for field in required_fields:
+                if field not in config:
+                    raise ValueError(f"Missing required field '{field}' in config file")
+            
+            print(f"✅ Configuration loaded from {config_file}")
+            return config
+            
+        except Exception as e:
+            print(f"❌ Error loading config file: {str(e)}")
+            sys.exit(1)
+    
+    def get_api_headers(self) -> Dict[str, str]:
+        """Get headers for API requests"""
+        return {
+            'Authorization': f'Bearer {self.access_token}',
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+    
+    def get_access_token(self) -> bool:
         """Generate access token for API calls"""
         try:
-            # First get client credentials for publisher app
             auth_header = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
             
-            # Get access token using client credentials
             token_url = f"{self.base_url}/oauth2/token"
             headers = {
                 'Authorization': f'Basic {auth_header}',
@@ -34,14 +109,14 @@ class WSO2APIManager:
                 'grant_type': 'password',
                 'username': self.username,
                 'password': self.password,
-                'scope': 'apim:api_view apim:api_create'
+                'scope': 'apim:api_view apim:api_create apim:api_publish'
             }
             
             response = self.session.post(token_url, headers=headers, data=data)
             if response.status_code == 200:
                 token_data = response.json()
                 self.access_token = token_data.get('access_token')
-                print(f"✅ Access token obtained successfully")
+                print("✅ Access token obtained successfully")
                 return True
             else:
                 print(f"❌ Failed to get access token: {response.status_code} - {response.text}")
@@ -51,18 +126,15 @@ class WSO2APIManager:
             print(f"❌ Error getting access token: {str(e)}")
             return False
     
-    def get_all_apis(self):
+    def get_all_apis(self) -> List[Dict]:
         """Get list of all APIs"""
         if not self.access_token:
             if not self.get_access_token():
                 return []
         
         try:
-            url = f"{self.base_url}/api/am/publisher/v3/apis"
-            headers = {
-                'Authorization': f'Bearer {self.access_token}',
-                'Content-Type': 'application/json'
-            }
+            url = f"{self.publisher_url}/apis"
+            headers = self.get_api_headers()
             
             all_apis = []
             offset = 0
@@ -77,7 +149,6 @@ class WSO2APIManager:
                     apis = data.get('list', [])
                     all_apis.extend(apis)
                     
-                    # Check if we have more APIs to fetch
                     if len(apis) < limit:
                         break
                     offset += limit
@@ -92,34 +163,26 @@ class WSO2APIManager:
             print(f"❌ Error getting APIs: {str(e)}")
             return []
     
-    def get_api_details(self, api_id):
+    def get_api_details(self, api_id: str) -> Optional[Dict]:
         """Get detailed information about a specific API"""
         try:
-            url = f"{self.base_url}/api/am/publisher/v3/apis/{api_id}"
-            headers = {
-                'Authorization': f'Bearer {self.access_token}',
-                'Content-Type': 'application/json'
-            }
+            url = f"{self.publisher_url}/apis/{api_id}"
+            headers = self.get_api_headers()
             
             response = self.session.get(url, headers=headers)
             if response.status_code == 200:
                 return response.json()
             else:
-                print(f"❌ Failed to get API details for {api_id}: {response.status_code}")
                 return None
                 
         except Exception as e:
-            print(f"❌ Error getting API details: {str(e)}")
             return None
     
-    def get_api_mediation_policies(self, api_id):
+    def get_api_mediation_policies(self, api_id: str) -> Dict:
         """Get mediation policies for an API"""
         try:
-            url = f"{self.base_url}/api/am/publisher/v3/apis/{api_id}/mediation-policies"
-            headers = {
-                'Authorization': f'Bearer {self.access_token}',
-                'Content-Type': 'application/json'
-            }
+            url = f"{self.publisher_url}/apis/{api_id}/mediation-policies"
+            headers = self.get_api_headers()
             
             response = self.session.get(url, headers=headers)
             if response.status_code == 200:
@@ -128,16 +191,25 @@ class WSO2APIManager:
                 return {'list': []}
                 
         except Exception as e:
-            print(f"❌ Error getting mediation policies: {str(e)}")
             return {'list': []}
     
-    def download_mediation_policy(self, api_id, policy_id):
+    def get_operation_policy_content(self, api_id: str, policy_id: str) -> Optional[bytes]:
+        """Get the raw content of a specific operation policy"""
+        try:
+            url = f"{self.publisher_url}/apis/{api_id}/operation-policies/{policy_id}/content"
+            response = self.session.get(url, headers=self.get_api_headers())
+            if response.status_code == 200:
+                return response.content
+            else:
+                return None
+        except Exception as e:
+            return None
+    
+    def download_mediation_policy(self, api_id: str, policy_id: str) -> Optional[str]:
         """Download the content of a mediation policy"""
         try:
-            url = f"{self.base_url}/api/am/publisher/v3/apis/{api_id}/mediation-policies/{policy_id}/content"
-            headers = {
-                'Authorization': f'Bearer {self.access_token}'
-            }
+            url = f"{self.publisher_url}/apis/{api_id}/mediation-policies/{policy_id}/content"
+            headers = self.get_api_headers()
             
             response = self.session.get(url, headers=headers)
             if response.status_code == 200:
@@ -146,208 +218,585 @@ class WSO2APIManager:
                 return None
                 
         except Exception as e:
-            print(f"❌ Error downloading policy content: {str(e)}")
             return None
     
-    def has_single_policy_across_resources(self, api_details):
-        """Check if API has a single policy applied to all resources"""
+    def decompress_policy_content(self, compressed_content: bytes) -> Optional[str]:
+        """Decompress policy content (handles ZIP and GZIP)"""
         try:
-            operations = api_details.get('operations', [])
-            if not operations:
-                return False, None
-            
-            # Get all unique operation policies
-            policies = set()
-            for operation in operations:
-                operation_policies = operation.get('operationPolicies', {})
+            with zipfile.ZipFile(io.BytesIO(compressed_content)) as zip_file:
+                file_list = zip_file.namelist()
                 
-                # Check request policies
-                request_policies = operation_policies.get('request', [])
-                for policy in request_policies:
-                    policy_name = policy.get('policyName', '')
-                    if policy_name:
-                        policies.add(policy_name)
+                for filename in file_list:
+                    if filename.endswith('.j2'):
+                        with zip_file.open(filename) as file:
+                            return file.read().decode('utf-8')
                 
-                # Check response policies  
-                response_policies = operation_policies.get('response', [])
-                for policy in response_policies:
-                    policy_name = policy.get('policyName', '')
-                    if policy_name:
-                        policies.add(policy_name)
+                for filename in file_list:
+                    if filename.endswith('.xml'):
+                        with zip_file.open(filename) as file:
+                            return file.read().decode('utf-8')
+                
+                for filename in file_list:
+                    if filename.endswith('.yaml') or filename.endswith('.yml'):
+                        with zip_file.open(filename) as file:
+                            return file.read().decode('utf-8')
+                
+                if file_list:
+                    with zip_file.open(file_list[0]) as file:
+                        return file.read().decode('utf-8')
+                        
+        except zipfile.BadZipFile:
+            pass
+        except Exception:
+            pass
+        
+        try:
+            decompressed = gzip.decompress(compressed_content)
+            return decompressed.decode('utf-8')
+        except Exception:
+            pass
+        
+        try:
+            return compressed_content.decode('utf-8')
+        except Exception:
+            pass
+        
+        return None
+    
+    def download_operation_policy_content(self, api_id: str, policy_id: str) -> Optional[str]:
+        """Download and decompress operation policy content"""
+        try:
+            compressed_content = self.get_operation_policy_content(api_id, policy_id)
             
-            # If there's exactly one unique policy across all operations, it's a single policy API
-            if len(policies) == 1:
-                return True, list(policies)[0]
-            elif len(policies) > 1:
-                # Check if it's the same policy repeated
-                policy_list = list(policies)
-                if all(p == policy_list[0] for p in policy_list):
-                    return True, policy_list[0]
+            if compressed_content:
+                return self.decompress_policy_content(compressed_content)
+            else:
+                return None
+                
+        except Exception as e:
+            return None
+    
+    def extract_roothost_from_policy_content(self, policy_content: str, policy_name: str = "") -> Tuple[str, str]:
+        """Extract roothost value from policy content and determine endpoint type"""
+        if not policy_content:
+            return "", "no_content"
+        
+        try:
+            roothost_value = ""
+            endpoint_type = "unknown"
             
-            return False, None
+            url_patterns = [
+                r'<address\s+uri=["\']([^"\']+)["\']',
+                r'<endpoint[^>]*>.*?<address[^>]+uri=["\']([^"\']+)["\']',
+                r'<property[^>]*value=["\']([^"\']*https?://[^"\']+)["\']',
+                r'https?://[^\s<>"\']+',
+            ]
+            
+            for pattern in url_patterns:
+                matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
+                if matches:
+                    roothost_value = matches[0] if isinstance(matches[0], str) else str(matches[0])
+                    endpoint_type = "operation_policy_hardcoded_url"
+                    break
+            
+            if not roothost_value:
+                template_patterns = [
+                    r'\{\{([^}]+)\}\}',
+                    r'\$\{([^}]+)\}',
+                ]
+                
+                for pattern in template_patterns:
+                    matches = re.findall(pattern, policy_content)
+                    if matches:
+                        for match in matches:
+                            if 'roothost' in match.lower() or 'host' in match.lower() or 'endpoint' in match.lower():
+                                roothost_value = f"{{{{{match}}}}}"
+                                endpoint_type = "operation_policy_dynamic_template"
+                                break
+                        if roothost_value:
+                            break
+            
+            if not roothost_value and ('yaml' in policy_content.lower() or 'parameters:' in policy_content):
+                yaml_patterns = [
+                    r'rootHost:\s*([^\n\r]+)',
+                    r'endpoint:\s*([^\n\r]+)',
+                    r'host:\s*([^\n\r]+)',
+                    r'baseUrl:\s*([^\n\r]+)',
+                ]
+                
+                for pattern in yaml_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE)
+                    if matches:
+                        roothost_value = matches[0].strip()
+                        endpoint_type = "operation_policy_yaml_parameter"
+                        break
+            
+            if not roothost_value:
+                param_patterns = [
+                    r'<parameter[^>]*name=["\']([^"\']*host[^"\']*)["\'][^>]*>([^<]+)',
+                    r'<parameter[^>]*name=["\']([^"\']*endpoint[^"\']*)["\'][^>]*>([^<]+)',
+                ]
+                
+                for pattern in param_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE)
+                    if matches:
+                        roothost_value = matches[0][1] if len(matches[0]) > 1 else str(matches[0])
+                        endpoint_type = "operation_parameter"
+                        break
+            
+            return roothost_value.strip(), endpoint_type
             
         except Exception as e:
-            print(f"❌ Error checking policy structure: {str(e)}")
-            return False, None
+            return "", "extraction_error"
     
-    def analyze_and_download_policies(self, output_dir="downloaded_policies"):
-        """Main function to analyze APIs and download single policies"""
-        # Create output directory
-        os.makedirs(output_dir, exist_ok=True)
+    def analyze_api_for_endpoints_and_policies(self, api_id: str, api_name: str, api_version: str) -> List[Dict]:
+        """Analyze API for endpoints from both operation and mediation policies"""
+        results = []
         
-        # Get all APIs
-        apis = self.get_all_apis()
-        if not apis:
-            print("❌ No APIs found or failed to retrieve APIs")
-            return
-        
-        single_policy_apis = []
-        results = {
-            'total_apis': len(apis),
-            'single_policy_apis': [],
-            'download_results': []
-        }
-        
-        print(f"\n🔍 Analyzing {len(apis)} APIs for single policy pattern...")
-        
-        for i, api in enumerate(apis, 1):
-            api_id = api.get('id')
-            api_name = api.get('name', 'Unknown')
-            api_version = api.get('version', '1.0.0')
-            
-            print(f"\n[{i}/{len(apis)}] Analyzing: {api_name} v{api_version}")
-            
-            # Get detailed API information
+        try:
             api_details = self.get_api_details(api_id)
             if not api_details:
-                continue
+                return []
             
-            # Check if it has single policy across all resources
-            has_single_policy, policy_name = self.has_single_policy_across_resources(api_details)
+            backend_endpoints = api_details.get('endpointConfig', {})
+            backend_url = None
+            has_backend_conf = False
+            if backend_endpoints:
+                production_endpoints = backend_endpoints.get('production_endpoints', {})
+                if production_endpoints:
+                    backend_url = production_endpoints.get('url', '')
+                    has_backend_conf = bool(backend_url)
             
-            if has_single_policy:
-                print(f"✅ Found single policy API: {policy_name}")
-                
-                api_info = {
+            operations = api_details.get('operations', [])
+            
+            if not operations:
+                results.append({
                     'api_id': api_id,
                     'api_name': api_name,
                     'api_version': api_version,
-                    'policy_name': policy_name,
-                    'context': api_details.get('context', ''),
-                    'resources_count': len(api_details.get('operations', []))
-                }
+                    'api_context': api_details.get('context', ''),
+                    'resource_path': 'N/A',
+                    'resource_method': 'N/A',
+                    'current_endpoint': backend_url or '',
+                    'new_endpoint': '',
+                    'endpoint_type': 'no_endpoint',
+                    'api_type': 'no_operations_defined',
+                    'policy_name': 'N/A',
+                    'policy_attribute': 'N/A',
+                    'operation_policy_count': 0,
+                    'has_backend_conf': has_backend_conf,
+                    'has_policy_parameter': False
+                })
+                return results
+            
+            for operation in operations:
+                resource_path = operation.get('target', '/')
+                resource_method = operation.get('verb', 'GET')
+                operation_policies = operation.get('operationPolicies', {})
                 
-                single_policy_apis.append(api_info)
-                results['single_policy_apis'].append(api_info)
+                request_policies = operation_policies.get('request', [])
+                response_policies = operation_policies.get('response', [])
+                all_operation_policies = request_policies + response_policies
+                operation_policy_count = len(all_operation_policies)
                 
-                # Try to download mediation policies
-                mediation_policies = self.get_api_mediation_policies(api_id)
+                has_policy_parameter = False
+                for policy in all_operation_policies:
+                    if policy.get('parameters') or 'parameter' in str(policy).lower():
+                        has_policy_parameter = True
+                        break
                 
-                for policy in mediation_policies.get('list', []):
-                    policy_id = policy.get('id')
-                    policy_name_file = policy.get('name', 'unknown_policy')
-                    policy_type = policy.get('type', 'unknown')
-                    
-                    # Download policy content
-                    policy_content = self.download_mediation_policy(api_id, policy_id)
-                    
-                    if policy_content:
-                        # Save policy to file
-                        filename = f"{api_name}_v{api_version}_{policy_name_file}_{policy_type}.xml"
-                        # Clean filename
-                        filename = "".join(c for c in filename if c.isalnum() or c in (' ', '-', '_', '.')).rstrip()
-                        filepath = os.path.join(output_dir, filename)
+                if all_operation_policies:
+                    for policy in all_operation_policies:
+                        policy_id = policy.get('policyId', '')
+                        policy_name = policy.get('policyName', '')
+                        policy_attribute = "operation_policy"
                         
-                        try:
-                            with open(filepath, 'w', encoding='utf-8') as f:
-                                f.write(policy_content)
+                        if policy_id:
+                            policy_content = self.download_operation_policy_content(api_id, policy_id)
                             
-                            print(f"📁 Downloaded policy: {filename}")
+                            if policy_content:
+                                roothost_value, endpoint_type = self.extract_roothost_from_policy_content(
+                                    policy_content, policy_name
+                                )
+                                
+                                if not has_policy_parameter and ('parameter' in policy_content.lower() or 'param' in policy_content.lower()):
+                                    has_policy_parameter = True
+                                
+                                if 'hardcoded' in endpoint_type:
+                                    api_type = "operation_policy_based"
+                                    final_endpoint_type = "operation_policy_hardcoded"
+                                elif 'parameter' in endpoint_type:
+                                    api_type = "operation_parameter_based"
+                                    final_endpoint_type = "operation_parameter"
+                                elif 'dynamic' in endpoint_type:
+                                    api_type = "operation_policy_based"
+                                    final_endpoint_type = "operation_policy_dynamic"
+                                elif 'yaml' in endpoint_type:
+                                    api_type = "operation_policy_based"
+                                    final_endpoint_type = "operation_policy_yaml"
+                                else:
+                                    api_type = "operation_policy_based"
+                                    final_endpoint_type = "operation_policy_unknown"
+                                
+                                results.append({
+                                    'api_id': api_id,
+                                    'api_name': api_name,
+                                    'api_version': api_version,
+                                    'api_context': api_details.get('context', ''),
+                                    'resource_path': resource_path,
+                                    'resource_method': resource_method,
+                                    'current_endpoint': backend_url or '',
+                                    'new_endpoint': roothost_value,
+                                    'endpoint_type': final_endpoint_type,
+                                    'api_type': api_type,
+                                    'policy_name': policy_name,
+                                    'policy_attribute': policy_attribute,
+                                    'operation_policy_count': operation_policy_count,
+                                    'has_backend_conf': has_backend_conf,
+                                    'has_policy_parameter': has_policy_parameter
+                                })
+                            else:
+                                results.append({
+                                    'api_id': api_id,
+                                    'api_name': api_name,
+                                    'api_version': api_version,
+                                    'api_context': api_details.get('context', ''),
+                                    'resource_path': resource_path,
+                                    'resource_method': resource_method,
+                                    'current_endpoint': backend_url or '',
+                                    'new_endpoint': '',
+                                    'endpoint_type': 'operation_policy_no_content',
+                                    'api_type': 'operation_policy_based',
+                                    'policy_name': policy_name,
+                                    'policy_attribute': policy_attribute,
+                                    'operation_policy_count': operation_policy_count,
+                                    'has_backend_conf': has_backend_conf,
+                                    'has_policy_parameter': has_policy_parameter
+                                })
+                else:
+                    old_api_policies = self.get_api_mediation_policies(api_id)
+                    mediation_policy_count = len(old_api_policies.get('list', [])) if old_api_policies else 0
+                    
+                    has_mediation_policy_parameter = False
+                    if old_api_policies and old_api_policies.get('list'):
+                        for policy in old_api_policies['list']:
+                            policy_content_check = self.download_mediation_policy(api_id, policy.get('id', ''))
+                            if policy_content_check and ('parameter' in policy_content_check.lower() or 'param' in policy_content_check.lower()):
+                                has_mediation_policy_parameter = True
+                                break
+                    
+                    if old_api_policies and old_api_policies.get('list'):
+                        for policy in old_api_policies['list']:
+                            policy_id = policy.get('id', '')
+                            policy_name = policy.get('name', '')
+                            policy_type = policy.get('type', 'mediation')
+                            policy_attribute = "mediation_policy"
                             
-                            results['download_results'].append({
+                            if policy_id:
+                                policy_content = self.download_mediation_policy(api_id, policy_id)
+                                
+                                if policy_content:
+                                    roothost_value, endpoint_type = self.extract_roothost_from_policy_content(
+                                        policy_content, policy_name
+                                    )
+                                    
+                                    if 'parameter' in policy_content.lower() or 'param' in policy_content.lower():
+                                        has_mediation_policy_parameter = True
+                                    
+                                    if 'hardcoded' in endpoint_type:
+                                        api_type = "mediation_policy_based"
+                                        final_endpoint_type = "mediation_policy_hardcoded"
+                                    elif 'parameter' in endpoint_type:
+                                        api_type = "mediation_parameter_based"
+                                        final_endpoint_type = "mediation_parameter"
+                                    elif 'dynamic' in endpoint_type:
+                                        api_type = "mediation_policy_based"
+                                        final_endpoint_type = "mediation_policy_dynamic"
+                                    elif 'yaml' in endpoint_type:
+                                        api_type = "mediation_policy_based"
+                                        final_endpoint_type = "mediation_policy_yaml"
+                                    else:
+                                        api_type = "mediation_policy_based"
+                                        final_endpoint_type = "mediation_policy_unknown"
+                                    
+                                    results.append({
+                                        'api_id': api_id,
+                                        'api_name': api_name,
+                                        'api_version': api_version,
+                                        'api_context': api_details.get('context', ''),
+                                        'resource_path': resource_path,
+                                        'resource_method': resource_method,
+                                        'current_endpoint': backend_url or '',
+                                        'new_endpoint': roothost_value,
+                                        'endpoint_type': final_endpoint_type,
+                                        'api_type': api_type,
+                                        'policy_name': policy_name,
+                                        'policy_attribute': policy_attribute,
+                                        'operation_policy_count': mediation_policy_count,
+                                        'has_backend_conf': has_backend_conf,
+                                        'has_policy_parameter': has_mediation_policy_parameter
+                                    })
+                                else:
+                                    results.append({
+                                        'api_id': api_id,
+                                        'api_name': api_name,
+                                        'api_version': api_version,
+                                        'api_context': api_details.get('context', ''),
+                                        'resource_path': resource_path,
+                                        'resource_method': resource_method,
+                                        'current_endpoint': backend_url or '',
+                                        'new_endpoint': '',
+                                        'endpoint_type': 'mediation_policy_no_content',
+                                        'api_type': 'mediation_policy_based',
+                                        'policy_name': policy_name,
+                                        'policy_attribute': policy_attribute,
+                                        'operation_policy_count': mediation_policy_count,
+                                        'has_backend_conf': has_backend_conf,
+                                        'has_policy_parameter': has_mediation_policy_parameter
+                                    })
+                    else:
+                        if backend_url:
+                            results.append({
+                                'api_id': api_id,
                                 'api_name': api_name,
-                                'policy_name': policy_name_file,
-                                'filename': filename,
-                                'status': 'success'
+                                'api_version': api_version,
+                                'api_context': api_details.get('context', ''),
+                                'resource_path': resource_path,
+                                'resource_method': resource_method,
+                                'current_endpoint': backend_url,
+                                'new_endpoint': backend_url,
+                                'endpoint_type': 'backend_config',
+                                'api_type': 'backend_endpoint_based',
+                                'policy_name': 'N/A',
+                                'policy_attribute': 'N/A',
+                                'operation_policy_count': 0,
+                                'has_backend_conf': has_backend_conf,
+                                'has_policy_parameter': False
                             })
-                            
-                        except Exception as e:
-                            print(f"❌ Failed to save policy file: {str(e)}")
-                            results['download_results'].append({
+                        else:
+                            results.append({
+                                'api_id': api_id,
                                 'api_name': api_name,
-                                'policy_name': policy_name_file,
-                                'filename': filename,
-                                'status': f'failed: {str(e)}'
+                                'api_version': api_version,
+                                'api_context': api_details.get('context', ''),
+                                'resource_path': resource_path,
+                                'resource_method': resource_method,
+                                'current_endpoint': '',
+                                'new_endpoint': '',
+                                'endpoint_type': 'no_endpoint',
+                                'api_type': 'no_endpoint_configured',
+                                'policy_name': 'N/A',
+                                'policy_attribute': 'N/A',
+                                'operation_policy_count': 0,
+                                'has_backend_conf': has_backend_conf,
+                                'has_policy_parameter': False
                             })
-            else:
-                print(f"⏭️ Skipping: Multiple or no policies found")
         
-        # Generate summary report
-        self.generate_report(results, output_dir)
-        
-        print(f"\n🎯 Analysis Complete!")
-        print(f"📊 Total APIs analyzed: {results['total_apis']}")
-        print(f"🎯 Single policy APIs found: {len(results['single_policy_apis'])}")
-        print(f"📁 Policies downloaded: {len([r for r in results['download_results'] if r['status'] == 'success'])}")
-        print(f"📂 Output directory: {output_dir}")
+        except Exception as e:
+            results.append({
+                'api_id': api_id,
+                'api_name': api_name,
+                'api_version': api_version,
+                'api_context': api_details.get('context', ''),
+                'resource_path': 'ERROR',
+                'resource_method': 'ERROR',
+                'current_endpoint': '',
+                'new_endpoint': '',
+                'endpoint_type': 'analysis_error',
+                'api_type': 'error',
+                'policy_name': 'ERROR',
+                'policy_attribute': 'ERROR',
+                'operation_policy_count': 0,
+                'has_backend_conf': False,
+                'has_policy_parameter': False
+            })
         
         return results
     
-    def generate_report(self, results, output_dir):
-        """Generate a detailed report of the analysis"""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_filename = f"policy_analysis_report_{timestamp}.json"
-        report_path = os.path.join(output_dir, report_filename)
-        
-        # Add timestamp to results
-        results['analysis_timestamp'] = datetime.now().isoformat()
-        results['wso2_version'] = '4.2'
-        
+    def process_all_apis_for_endpoints(self) -> List[Dict]:
+        """Process all APIs to extract endpoint information"""
         try:
-            with open(report_path, 'w', encoding='utf-8') as f:
-                json.dump(results, f, indent=2, ensure_ascii=False)
+            if not self.get_access_token():
+                print("Failed to authenticate with provided credentials")
+                return []
             
-            print(f"📋 Report generated: {report_filename}")
+            all_apis = self.get_all_apis()
             
-            # Also generate a CSV summary
-            csv_filename = f"single_policy_apis_{timestamp}.csv"
-            csv_path = os.path.join(output_dir, csv_filename)
+            if not all_apis:
+                print("No APIs found")
+                return []
             
-            with open(csv_path, 'w', encoding='utf-8') as f:
-                f.write("API Name,Version,Policy Name,Context,Resources Count,API ID\n")
-                for api in results['single_policy_apis']:
-                    f.write(f"\"{api['api_name']}\",\"{api['api_version']}\",\"{api['policy_name']}\",\"{api['context']}\",{api['resources_count']},\"{api['api_id']}\"\n")
+            all_results = []
+            total_apis = len(all_apis)
             
-            print(f"📊 CSV summary: {csv_filename}")
+            print(f"Processing {total_apis} APIs for endpoint analysis...")
+            
+            for i, api in enumerate(all_apis, 1):
+                api_id = api.get('id', '')
+                api_name = api.get('name', 'Unknown')
+                api_version = api.get('version', '1.0.0')
+                
+                print(f"[{i}/{total_apis}] Processing: {api_name} v{api_version}")
+                
+                api_results = self.analyze_api_for_endpoints_and_policies(api_id, api_name, api_version)
+                all_results.extend(api_results)
+            
+            return all_results
             
         except Exception as e:
-            print(f"❌ Failed to generate report: {str(e)}")
+            print(f"Error processing APIs: {str(e)}")
+            return []
+    
+    def save_to_csv(self, data: List[Dict], output_file: str):
+        """Save endpoint data to CSV file"""
+        try:
+            if not data:
+                print("No data to save")
+                return
+            
+            fieldnames = [
+                'api_id', 'api_name', 'api_version', 'api_context', 'resource_path', 'resource_method',
+                'current_endpoint', 'new_endpoint', 'endpoint_type', 'api_type', 'policy_name',
+                'policy_attribute', 'operation_policy_count', 'has_backend_conf', 'has_policy_parameter'
+            ]
+            
+            with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(data)
+            
+            print(f"✅ Data saved to {output_file}")
+            
+        except Exception as e:
+            print(f"❌ Error saving to CSV: {str(e)}")
+    
+    def generate_no_endpoints_report(self, data: List[Dict], output_file: str):
+        """Generate detailed report for APIs without endpoints"""
+        try:
+            no_endpoint_data = [d for d in data if d['endpoint_type'] == 'no_endpoint']
+            
+            api_summary = {}
+            for row in no_endpoint_data:
+                api_key = f"{row['api_name']}_v{row['api_version']}"
+                if api_key not in api_summary:
+                    api_summary[api_key] = {
+                        'api_id': row['api_id'],
+                        'api_name': row['api_name'],
+                        'api_version': row['api_version'],
+                        'api_context': row['api_context'],
+                        'total_resources': 0,
+                        'resources_without_endpoints': 0
+                    }
+                api_summary[api_key]['total_resources'] += 1
+                if row['endpoint_type'] == 'no_endpoint':
+                    api_summary[api_key]['resources_without_endpoints'] += 1
+            
+            fieldnames = ['api_id', 'api_name', 'api_version', 'api_context', 'total_resources', 'resources_without_endpoints']
+            
+            with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for api_data in api_summary.values():
+                    writer.writerow(api_data)
+            
+            print(f"✅ No endpoints report saved to {output_file}")
+            
+        except Exception as e:
+            print(f"❌ Error generating no endpoints report: {str(e)}")
+
+def print_summary_statistics(data: List[Dict], output_file: str):
+    """Print summary statistics for the extracted data"""
+    operation_policies = [d for d in data if d.get('policy_attribute') == 'operation_policy']
+    mediation_policies = [d for d in data if d.get('policy_attribute') == 'mediation_policy']
+    
+    policy_hardcoded = [d for d in data if 'hardcoded' in d['endpoint_type']]
+    policy_dynamic = [d for d in data if 'dynamic' in d['endpoint_type']]
+    policy_yaml = [d for d in data if 'yaml' in d['endpoint_type']]
+    operation_parameters = [d for d in data if 'parameter' in d['endpoint_type']]
+    backend_config = [d for d in data if d['endpoint_type'] == 'backend_config']
+    no_endpoints = [d for d in data if d['endpoint_type'] == 'no_endpoint']
+    
+    apis_with_backend_conf = [d for d in data if d['has_backend_conf'] == True]
+    apis_with_policy_params = [d for d in data if d['has_policy_parameter'] == True]
+    
+    print(f"\n📊 EXTRACTION SUMMARY:")
+    print(f"=" * 50)
+    print(f"Total API resources: {len(data)}")
+    print(f"Unique APIs processed: {len(set(d['api_id'] for d in data))}")
+    print(f"Data saved to: {output_file}")
+    
+    print(f"\n📋 POLICY ATTRIBUTES:")
+    print(f"Operation policies (NEW APIs): {len(operation_policies)}")
+    print(f"Mediation policies (OLD APIs): {len(mediation_policies)}")
+    
+    print(f"\n🔗 ENDPOINT TYPES:")
+    print(f"Policy hardcoded URLs: {len(policy_hardcoded)} - Direct URLs in policies")
+    print(f"Policy dynamic templates: {len(policy_dynamic)} - Templates like {{{{rootHost}}}}")
+    print(f"Policy YAML parameters: {len(policy_yaml)} - YAML parameter values")
+    print(f"Operation parameters: {len(operation_parameters)} - Policy parameters")
+    print(f"Backend configuration: {len(backend_config)} - WSO2 backend endpoints")
+    print(f"No endpoints found: {len(no_endpoints)} - APIs without endpoints")
+    
+    print(f"\n⚙️ CONFIGURATION STATUS:")
+    print(f"APIs with backend configuration: {len(set(d['api_id'] for d in apis_with_backend_conf))}")
+    print(f"APIs with policy parameters: {len(set(d['api_id'] for d in apis_with_policy_params))}")
+    
+    apis_with_endpoints = len(set(d['api_id'] for d in data if d['new_endpoint']))
+    apis_without_endpoints = len(set(d['api_id'] for d in data if not d['new_endpoint']))
+    print(f"\n📈 ENDPOINT COVERAGE:")
+    print(f"APIs with endpoints found: {apis_with_endpoints}")
+    print(f"APIs without endpoints: {apis_without_endpoints}")
+    
+    if policy_hardcoded:
+        print(f"\n🔍 SAMPLE HARDCODED ENDPOINTS:")
+        unique_endpoints = list(set(d['new_endpoint'] for d in policy_hardcoded if d['new_endpoint']))[:5]
+        for i, endpoint in enumerate(unique_endpoints, 1):
+            count = len([d for d in policy_hardcoded if d['new_endpoint'] == endpoint])
+            print(f"  {i}. {endpoint} (used by {count} resources)")
 
 def main():
-    # Configuration
-    WSO2_BASE_URL = "https://localhost:9443"  # Change to your WSO2 URL
-    USERNAME = "admin"  # Change to your username
-    PASSWORD = "admin"  # Change to your password
-    OUTPUT_DIR = "wso2_single_policies"  # Output directory for downloaded policies
-    
-    print("🚀 WSO2 API Manager 4.2 - Single Policy Extractor")
+    """Main function to run the WSO2 policy extraction"""
+    print("🚀 WSO2 API Manager 4.2 - Policy Endpoint Extractor")
     print("=" * 60)
     
-    # Initialize WSO2 API Manager client
-    wso2_client = WSO2APIManager(WSO2_BASE_URL, USERNAME, PASSWORD)
+    config_file = "policy_config.json"
     
-    # Run analysis and download policies
+    if len(sys.argv) > 1 and sys.argv[1] == "--create-config":
+        create_default_config_file(config_file)
+        return
+    
     try:
-        results = wso2_client.analyze_and_download_policies(OUTPUT_DIR)
+        wso2_client = WSO2APIManager(config_file)
         
-        if results:
-            print("\n✅ Script completed successfully!")
-            print(f"Check the '{OUTPUT_DIR}' directory for downloaded policies and reports.")
+        print(f"\n📡 Connecting to: {wso2_client.base_url}")
+        print(f"👤 Username: {wso2_client.username}")
+        print(f"🔒 SSL Verification: {wso2_client.verify_ssl}")
+        
+        data = wso2_client.process_all_apis_for_endpoints()
+        
+        if data:
+            output_file = wso2_client.config.get('output_csv', 'wso2_policy_endpoints.csv')
+            wso2_client.save_to_csv(data, output_file)
+            
+            print_summary_statistics(data, output_file)
+            
+            no_endpoints = [d for d in data if d['endpoint_type'] == 'no_endpoint']
+            if no_endpoints:
+                no_endpoint_file = output_file.replace('.csv', '_no_endpoints.csv')
+                wso2_client.generate_no_endpoints_report(data, no_endpoint_file)
+                print(f"\n📄 No endpoints report: {no_endpoint_file}")
+            
+            print(f"\n✅ Script completed successfully!")
+            print(f"📁 Check '{output_file}' for detailed results.")
         else:
-            print("\n❌ Script completed with errors.")
+            print("\n❌ No data extracted. Check credentials and WSO2 connectivity.")
             
     except Exception as e:
         print(f"\n❌ Script failed with error: {str(e)}")
+        if "config file" in str(e).lower():
+            print("\nTo create a sample config file, run:")
+            print("python wso2_extractor.py --create-config")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
