@@ -1,3 +1,9 @@
+#!/usr/bin/env python3
+"""
+WSO2 API Manager 4.2 - Policy Endpoint Extractor
+Corrected version based on working code
+"""
+
 import requests
 import json
 import base64
@@ -214,27 +220,23 @@ class WSO2APIManager:
     def try_existing_clients(self):
         """Try to use existing OAuth clients"""
         try:
-            # Get list of existing applications via Carbon Admin Services
-            admin_headers = {
-                'Authorization': f'Basic {base64.b64encode(f"{self.username}:{self.password}".encode()).decode()}',
-                'Content-Type': 'application/soap+xml'
-            }
-            
-            # Try to get existing OAuth apps
-            apps_url = f"{self.base_url}/services/OAuthAdminService"
-            
-            # This is a simplified approach - in real scenarios you'd need SOAP calls
-            # For now, try known application patterns
+            # Known application patterns
             known_apps = [
                 ('admin_PolicyExtractor', 'admin_PolicyExtractor'),
                 ('WSO2_API_Manager', 'WSO2_API_Manager'),
                 ('DefaultApplication_PRODUCTION', 'DefaultApplication_PRODUCTION'),
-                ('carbon_app', 'carbon_app')
+                ('carbon_app', 'carbon_app'),
+                ('admin', 'admin'),
+                ('apim_devportal', 'apim_devportal'),
+                ('apim_publisher', 'apim_publisher'),
+                ('wso2carbon', 'wso2carbon'),
+                ('client', 'client')
             ]
             
             token_url = f"{self.base_url}/oauth2/token"
             
             for client_id, client_secret in known_apps:
+                print(f"Trying existing client: {client_id}")
                 auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
                 headers = {
                     'Authorization': f'Basic {auth_header}',
@@ -253,6 +255,8 @@ class WSO2APIManager:
                     self.access_token = token_data.get('access_token')
                     print(f"✅ Success with existing client: {client_id}")
                     return True
+                else:
+                    print(f"❌ Failed with {client_id}: {response.status_code}")
             
             return False
             
@@ -429,6 +433,11 @@ class WSO2APIManager:
                 
                 for filename in file_list:
                     if filename.endswith('.xml'):
+                        with zip_file.open(filename) as file:
+                            return file.read().decode('utf-8')
+                
+                for filename in file_list:
+                    if filename.endswith('.yaml') or filename.endswith('.yml'):
                         with zip_file.open(filename) as file:
                             return file.read().decode('utf-8')
                 
@@ -612,7 +621,7 @@ class WSO2APIManager:
                     'resource_path': 'N/A',
                     'resource_method': 'N/A',
                     'current_endpoint': backend_url,
-                    'new_endpoint': '',
+                    'new_endpoint': backend_url,
                     'endpoint_type': 'no_endpoint',
                     'api_type': 'no_operations_defined',
                     'policy_name': 'N/A',
@@ -693,6 +702,25 @@ class WSO2APIManager:
                                     'has_backend_conf': has_backend_conf,
                                     'has_policy_parameter': has_policy_parameter
                                 })
+                            else:
+                                # No policy content found
+                                results.append({
+                                    'api_id': api_id,
+                                    'api_name': api_name,
+                                    'api_version': api_version,
+                                    'api_context': api_details.get('context', ''),
+                                    'resource_path': resource_path,
+                                    'resource_method': resource_method,
+                                    'current_endpoint': backend_url,
+                                    'new_endpoint': backend_url,
+                                    'endpoint_type': 'operation_policy_no_content',
+                                    'api_type': 'operation_policy_based',
+                                    'policy_name': policy_name,
+                                    'policy_attribute': policy_attribute,
+                                    'operation_policy_count': operation_policy_count,
+                                    'has_backend_conf': has_backend_conf,
+                                    'has_policy_parameter': has_policy_parameter
+                                })
                 else:
                     old_api_policies = self.get_mediation_policies(api_id)
                     mediation_policy_count = len(old_api_policies.get('list', []))
@@ -751,6 +779,14 @@ class WSO2APIManager:
                                         'resource_method': resource_method,
                                         'current_endpoint': extracted_endpoint,
                                         'new_endpoint': extracted_endpoint,
+                                        'endpoint_type': final_endpoint_type,
+                                        'api_type': api_type,
+                                        'policy_name': policy_name,
+                                        'policy_attribute': policy_attribute,
+                                        'operation_policy_count': mediation_policy_count,
+                                        'has_backend_conf': has_backend_conf,
+                                        'has_policy_parameter': has_mediation_policy_parameter
+                                    })
                                 else:
                                     # No mediation policy content found
                                     results.append({
@@ -764,14 +800,6 @@ class WSO2APIManager:
                                         'new_endpoint': backend_url,
                                         'endpoint_type': 'mediation_policy_no_content',
                                         'api_type': 'mediation_policy_based',
-                                        'policy_name': policy_name,
-                                        'policy_attribute': policy_attribute,
-                                        'operation_policy_count': mediation_policy_count,
-                                        'has_backend_conf': has_backend_conf,
-                                        'has_policy_parameter': has_mediation_policy_parameter
-                                    })
-                                        'endpoint_type': final_endpoint_type,
-                                        'api_type': api_type,
                                         'policy_name': policy_name,
                                         'policy_attribute': policy_attribute,
                                         'operation_policy_count': mediation_policy_count,
@@ -815,8 +843,26 @@ class WSO2APIManager:
                                 'has_backend_conf': has_backend_conf,
                                 'has_policy_parameter': False
                             })
+        
         except Exception as e:
             print(f"Error analyzing API {api_id}: {str(e)}")
+            results.append({
+                'api_id': api_id,
+                'api_name': api_name,
+                'api_version': api_version,
+                'api_context': api_details.get('context', ''),
+                'resource_path': 'ERROR',
+                'resource_method': 'ERROR',
+                'current_endpoint': '',
+                'new_endpoint': '',
+                'endpoint_type': 'analysis_error',
+                'api_type': 'error',
+                'policy_name': 'ERROR',
+                'policy_attribute': 'ERROR',
+                'operation_policy_count': 0,
+                'has_backend_conf': False,
+                'has_policy_parameter': False
+            })
         
         return results
     
