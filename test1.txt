@@ -258,109 +258,136 @@ class WSO2APIManager:
             print(f"Analyzing policy: {policy_name}")
             print(f"Content preview: {policy_content[:200]}...")
             
-            # Check if this is the specific rootHost policy
-            if "1VitalitySetRootHostAllMANDATORY" in policy_name or "rootHost" in policy_name:
-                print(f"Processing rootHost policy: {policy_name}")
-                
-                # Look for YAML parameters section
-                if 'parameters:' in policy_content or 'roothost:' in policy_content.lower():
-                    try:
-                        # Try to parse as YAML
-                        yaml_content = yaml.safe_load(policy_content)
-                        if isinstance(yaml_content, dict):
-                            # Look for parameters section
-                            if 'parameters' in yaml_content:
-                                params = yaml_content['parameters']
-                                if 'roothost' in params:
-                                    roothost_value = params['roothost']
-                                    endpoint_type = "operation_policy_yaml_roothost"
-                                    print(f"Found YAML roothost parameter: {roothost_value}")
-                                    return roothost_value.strip(), endpoint_type
-                    except yaml.YAMLError as e:
-                        print(f"YAML parsing error: {e}")
-                    
-                    # Try regex patterns for YAML format
-                    yaml_patterns = [
-                        r'parameters:\s*\n\s*roothost:\s*([^\n\r]+)',
-                        r'roothost:\s*([^\n\r]+)',
-                        r'rootHost:\s*([^\n\r]+)',
-                    ]
-                    
-                    for pattern in yaml_patterns:
-                        matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
-                        if matches:
-                            roothost_value = matches[0].strip()
-                            endpoint_type = "operation_policy_yaml_roothost"
-                            print(f"Found YAML roothost with regex: {roothost_value}")
-                            return roothost_value.strip(), endpoint_type
+            # Pattern 1: Look for rootHost in J2 template files (most common for mediation policies)
+            # J2 files often contain Jinja2 template syntax with variables
+            j2_patterns = [
+                r'rootHost["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # rootHost = "value" or rootHost: "value"
+                r'roothost["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # case insensitive
+                r'ROOT_HOST["\s]*[=:]["\s]*([^"\s\n\r}]+)', # uppercase
+                r'root_host["\s]*[=:]["\s]*([^"\s\n\r}]+)', # underscore
+            ]
             
-            # Pattern 1: XML property format (for old APIs)
-            roothost_property_patterns = [
+            for pattern in j2_patterns:
+                matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
+                if matches:
+                    roothost_value = matches[0].strip().strip('"\'')
+                    endpoint_type = "mediation_policy_j2_roothost"
+                    print(f"Found J2 rootHost: {roothost_value}")
+                    return roothost_value, endpoint_type
+            
+            # Pattern 2: YAML parameters section (for operation policies)
+            if 'parameters:' in policy_content or 'roothost:' in policy_content.lower():
+                try:
+                    # Try to parse as YAML
+                    yaml_content = yaml.safe_load(policy_content)
+                    if isinstance(yaml_content, dict):
+                        # Look for parameters section
+                        if 'parameters' in yaml_content:
+                            params = yaml_content['parameters']
+                            if 'roothost' in params:
+                                roothost_value = params['roothost']
+                                endpoint_type = "operation_policy_yaml_roothost"
+                                print(f"Found YAML roothost parameter: {roothost_value}")
+                                return roothost_value.strip(), endpoint_type
+                except yaml.YAMLError as e:
+                    print(f"YAML parsing error: {e}")
+                
+                # Try regex patterns for YAML format
+                yaml_patterns = [
+                    r'parameters:\s*\n\s*roothost:\s*([^\n\r]+)',
+                    r'roothost:\s*([^\n\r]+)',
+                    r'rootHost:\s*([^\n\r]+)',
+                ]
+                
+                for pattern in yaml_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
+                    if matches:
+                        roothost_value = matches[0].strip().strip('"\'')
+                        endpoint_type = "operation_policy_yaml_roothost"
+                        print(f"Found YAML roothost with regex: {roothost_value}")
+                        return roothost_value.strip(), endpoint_type
+            
+            # Pattern 3: XML property format (for XML-based mediation policies)
+            xml_property_patterns = [
                 r'<property[^>]*name=["\']rootHost["\'][^>]*value=["\']([^"\']+)["\']',
                 r'<property[^>]*name=["\']roothost["\'][^>]*value=["\']([^"\']+)["\']',
                 r'<property[^>]*name=["\']root_host["\'][^>]*value=["\']([^"\']+)["\']',
+                r'<property[^>]*name=["\']ROOT_HOST["\'][^>]*value=["\']([^"\']+)["\']',
             ]
             
-            for pattern in roothost_property_patterns:
+            for pattern in xml_property_patterns:
                 matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
                 if matches:
                     roothost_value = matches[0]
-                    endpoint_type = "mediation_policy_roothost_property"
+                    endpoint_type = "mediation_policy_xml_property"
                     print(f"Found XML rootHost property: {roothost_value}")
-                    break
+                    return roothost_value, endpoint_type
             
-            # Pattern 2: Template variables
-            if not roothost_value:
-                template_patterns = [
-                    r'\{\{([^}]*[Rr]oot[Hh]ost[^}]*)\}\}',
-                    r'\{\{([^}]*[Hh]ost[^}]*)\}\}',
-                    r'\{\{([^}]*[Ee]ndpoint[^}]*)\}\}',
-                    r'\$\{([^}]*[Rr]oot[Hh]ost[^}]*)\}',
-                    r'\$\{([^}]*[Hh]ost[^}]*)\}',
-                ]
-                
-                for pattern in template_patterns:
-                    matches = re.findall(pattern, policy_content, re.IGNORECASE)
-                    if matches:
-                        match = matches[0]
-                        if 'roothost' in match.lower() or 'host' in match.lower():
-                            if '{{' in policy_content:
-                                roothost_value = f"{{{{{match}}}}}"
-                            else:
-                                roothost_value = f"${{{match}}}"
-                            endpoint_type = "operation_policy_dynamic_template"
-                            print(f"Found template variable: {roothost_value}")
-                            break
-                    if roothost_value:
-                        break
+            # Pattern 4: Template variables in J2 files
+            template_patterns = [
+                r'\{\{([^}]*[Rr]oot[Hh]ost[^}]*)\}\}',  # {{ rootHost }}
+                r'\{\{([^}]*[Hh]ost[^}]*)\}\}',         # {{ host }}
+                r'\{\{([^}]*[Ee]ndpoint[^}]*)\}\}',     # {{ endpoint }}
+                r'\$\{([^}]*[Rr]oot[Hh]ost[^}]*)\}',   # ${ rootHost }
+                r'\$\{([^}]*[Hh]ost[^}]*)\}',          # ${ host }
+            ]
             
-            # Pattern 3: Hardcoded URLs in address elements
-            if not roothost_value:
-                url_patterns = [
-                    r'<address\s+uri=["\']([^"\']+)["\']',
-                    r'<endpoint[^>]*>.*?<address[^>]+uri=["\']([^"\']+)["\']',
-                    r'<http[^>]*>.*?<uri-template[^>]*>([^<]+)</uri-template>',
-                    r'<property[^>]*value=["\']([^"\']*https?://[^"\']+)["\']',
-                ]
-                
-                for pattern in url_patterns:
-                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
-                    if matches:
-                        roothost_value = matches[0]
-                        endpoint_type = "mediation_policy_hardcoded_url"
-                        print(f"Found hardcoded URL: {roothost_value}")
-                        break
+            for pattern in template_patterns:
+                matches = re.findall(pattern, policy_content, re.IGNORECASE)
+                if matches:
+                    match = matches[0]
+                    if 'roothost' in match.lower() or 'host' in match.lower():
+                        if '{{' in policy_content:
+                            roothost_value = f"{{{{{match}}}}}"
+                        else:
+                            roothost_value = f"${{{match}}}"
+                        endpoint_type = "mediation_policy_j2_template"
+                        print(f"Found J2 template variable: {roothost_value}")
+                        return roothost_value, endpoint_type
             
-            # Pattern 4: Look for any HTTP/HTTPS URLs
-            if not roothost_value:
-                general_url_pattern = r'https?://[^\s<>"\'>\)]+[^\s<>"\'>\)\.,]'
-                matches = re.findall(general_url_pattern, policy_content)
+            # Pattern 5: Direct assignment in J2 files
+            j2_assignment_patterns = [
+                r'set\s+rootHost\s*=\s*["\']([^"\']+)["\']',
+                r'set\s+roothost\s*=\s*["\']([^"\']+)["\']',
+                r'rootHost\s*=\s*["\']([^"\']+)["\']',
+                r'roothost\s*=\s*["\']([^"\']+)["\']',
+            ]
+            
+            for pattern in j2_assignment_patterns:
+                matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
                 if matches:
                     roothost_value = matches[0]
-                    endpoint_type = "policy_general_url"
-                    print(f"Found general URL: {roothost_value}")
+                    endpoint_type = "mediation_policy_j2_assignment"
+                    print(f"Found J2 assignment: {roothost_value}")
+                    return roothost_value, endpoint_type
             
-            return roothost_value.strip(), endpoint_type
+            # Pattern 6: Hardcoded URLs in address elements
+            url_patterns = [
+                r'<address\s+uri=["\']([^"\']+)["\']',
+                r'<endpoint[^>]*>.*?<address[^>]+uri=["\']([^"\']+)["\']',
+                r'<http[^>]*>.*?<uri-template[^>]*>([^<]+)</uri-template>',
+                r'uri["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # For J2 files
+            ]
+            
+            for pattern in url_patterns:
+                matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
+                if matches:
+                    roothost_value = matches[0]
+                    endpoint_type = "mediation_policy_hardcoded_url"
+                    print(f"Found hardcoded URL: {roothost_value}")
+                    return roothost_value, endpoint_type
+            
+            # Pattern 7: Look for any HTTP/HTTPS URLs in J2 content
+            general_url_pattern = r'https?://[^\s<>"\'}\)]+[^\s<>"\'}\)\.,]'
+            matches = re.findall(general_url_pattern, policy_content)
+            if matches:
+                roothost_value = matches[0]
+                endpoint_type = "mediation_policy_general_url"
+                print(f"Found general URL: {roothost_value}")
+                return roothost_value, endpoint_type
+            
+            print(f"No rootHost value found in policy content")
+            return roothost_value, endpoint_type
             
         except Exception as e:
             print(f"Error extracting roothost from {policy_name}: {str(e)}")
@@ -406,24 +433,9 @@ class WSO2APIManager:
                 })
                 return results
             
-            # Get API-level mediation policies first (for old APIs)
+            # Get API-level mediation policies first (but don't use them for processing)
             api_mediation_policies = self.get_mediation_policies(api_id)
-            api_level_policies = {}
-            
-            for policy in api_mediation_policies.get('list', []):
-                policy_id = policy.get('id', '')
-                policy_name = policy.get('name', '')
-                if policy_id:
-                    policy_content = self.download_mediation_policy(api_id, policy_id)
-                    if policy_content:
-                        roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content, policy_name)
-                        api_level_policies[policy_id] = {
-                            'policy_name': policy_name,
-                            'policy_attribute': 'mediation_policy',
-                            'roothost_value': roothost_value,
-                            'endpoint_type': endpoint_type,
-                            'has_parameters': bool('parameter' in str(policy_content).lower() if policy_content else False)
-                        }
+            print(f"  Found {len(api_mediation_policies.get('list', []))} API-level mediation policies")
             
             # Process each operation/resource individually
             for operation in operations:
@@ -492,33 +504,36 @@ class WSO2APIManager:
                                     found_endpoint = True
                                     break  # Found endpoint for this resource, move to next resource
                 
-                # If no operation policies found, check for resource-specific mediation policies (OLD APIs)
+                # If no operation policies found, check for attached mediation policies (OLD APIs)
                 if not found_endpoint:
-                    print(f"    No operation policies found, checking resource-specific mediation policies...")
+                    print(f"    No operation policies found, checking attached mediation policies...")
                     
-                    # First try resource-specific mediation policies
-                    resource_mediation_policies = self.get_resource_mediation_policies(api_id, resource_path, resource_method)
-                    
-                    if resource_mediation_policies.get('list'):
-                        print(f"    Found {len(resource_mediation_policies['list'])} resource-specific mediation policies")
-                        for policy in resource_mediation_policies['list']:
+                    # For old APIs, check each mediation policy from the API-level list
+                    # but download and check the actual content for each resource
+                    if api_mediation_policies.get('list'):
+                        for policy in api_mediation_policies['list']:
                             policy_id = policy.get('id', '')
                             policy_name = policy.get('name', '')
                             
                             if policy_id:
+                                print(f"    Checking mediation policy: {policy_name}")
                                 policy_content = self.download_mediation_policy(api_id, policy_id)
+                                
                                 if policy_content:
-                                    print(f"    Analyzing resource mediation policy: {policy_name}")
+                                    print(f"    Downloaded policy content ({len(policy_content)} chars)")
                                     roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content, policy_name)
                                     
                                     if roothost_value:
                                         # Determine API type for mediation policies
-                                        if 'roothost' in endpoint_type.lower():
+                                        if 'j2' in endpoint_type.lower():
                                             api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_roothost"
+                                            final_endpoint_type = "mediation_policy_j2"
+                                        elif 'xml' in endpoint_type.lower():
+                                            api_type = "mediation_policy_based"
+                                            final_endpoint_type = "mediation_policy_xml"
                                         elif 'template' in endpoint_type.lower():
                                             api_type = "mediation_policy_based"
-                                            final_endpoint_type = "mediation_policy_dynamic"
+                                            final_endpoint_type = "mediation_policy_template"
                                         elif 'hardcoded' in endpoint_type.lower():
                                             api_type = "mediation_policy_based"
                                             final_endpoint_type = "mediation_policy_hardcoded"
@@ -544,51 +559,62 @@ class WSO2APIManager:
                                             'has_policy_parameter': bool('parameter' in str(policy_content).lower())
                                         })
                                         found_endpoint = True
-                                        print(f"    ✅ Found rootHost in resource mediation policy: {roothost_value}")
-                                        break  # Found endpoint for this resource
-                    
-                    # If no resource-specific policies, check API-level mediation policies
-                    if not found_endpoint and api_level_policies:
-                        print(f"    No resource-specific policies, checking API-level mediation policies...")
-                        for policy_id, policy_info in api_level_policies.items():
-                            if policy_info['roothost_value']:
-                                # Determine API type for mediation policies
-                                if 'roothost' in policy_info['endpoint_type'].lower():
-                                    api_type = "mediation_policy_based"
-                                    final_endpoint_type = "mediation_policy_roothost"
-                                elif 'template' in policy_info['endpoint_type'].lower():
-                                    api_type = "mediation_policy_based"
-                                    final_endpoint_type = "mediation_policy_dynamic"
-                                elif 'hardcoded' in policy_info['endpoint_type'].lower():
-                                    api_type = "mediation_policy_based"
-                                    final_endpoint_type = "mediation_policy_hardcoded"
+                                        print(f"    ✅ Found rootHost in mediation policy: {roothost_value}")
+                                        break  # Found endpoint for this resource, move to next resource
                                 else:
-                                    api_type = "mediation_policy_based"
-                                    final_endpoint_type = policy_info['endpoint_type']
-                                
-                                results.append({
-                                    'api_id': api_id,
-                                    'api_name': api_name,
-                                    'api_version': api_version,
-                                    'api_context': api_details.get('context', ''),
-                                    'resource_path': resource_path,
-                                    'resource_method': resource_method,
-                                    'current_endpoint': policy_info['roothost_value'],
-                                    'new_endpoint': policy_info['roothost_value'],
-                                    'endpoint_type': final_endpoint_type,
-                                    'api_type': api_type,
-                                    'policy_name': policy_info['policy_name'],
-                                    'policy_attribute': policy_info['policy_attribute'],
-                                    'operation_policy_count': len(api_level_policies),
-                                    'has_backend_conf': has_backend_conf,
-                                    'has_policy_parameter': policy_info['has_parameters']
-                                })
-                                found_endpoint = True
-                                print(f"    ✅ Found rootHost in API-level mediation policy: {policy_info['roothost_value']}")
-                                break  # Found endpoint for this resource
+                                    print(f"    ❌ Failed to download policy content for: {policy_name}")
+                    else:
+                        print(f"    No mediation policies found at API level")
                 
                 # If still no endpoint found, use backend or mark as no endpoint
                 if not found_endpoint:
+                    print(f"    No policies with rootHost found, using backend or no endpoint")
+                    if backend_url:
+                        results.append({
+                            'api_id': api_id,
+                            'api_name': api_name,
+                            'api_version': api_version,
+                            'api_context': api_details.get('context', ''),
+                            'resource_path': resource_path,
+                            'resource_method': resource_method,
+                            'current_endpoint': backend_url,
+                            'new_endpoint': backend_url,
+                            'endpoint_type': 'backend_config',
+                            'api_type': 'backend_endpoint_based',
+                            'policy_name': 'N/A',
+                            'policy_attribute': 'N/A',
+                            'operation_policy_count': 0,
+                            'has_backend_conf': has_backend_conf,
+                            'has_policy_parameter': False
+                        })
+                    else:
+                        results.append({
+                            'api_id': api_id,
+                            'api_name': api_name,
+                            'api_version': api_version,
+                            'api_context': api_details.get('context', ''),
+                            'resource_path': resource_path,
+                            'resource_method': resource_method,
+                            'current_endpoint': '',
+                            'new_endpoint': '',
+                            'endpoint_type': 'no_endpoint',
+                            'api_type': 'no_endpoint_configured',
+                            'policy_name': 'N/A',
+                            'policy_attribute': 'N/A',
+                            'operation_policy_count': 0,
+                            'has_backend_conf': has_backend_conf,
+                            'has_policy_parameter': False
+                        })
+                                        print(f"    ✅ Found rootHost in mediation policy: {roothost_value}")
+                                        break  # Found endpoint for this resource, move to next resource
+                                else:
+                                    print(f"    ❌ Failed to download policy content for: {policy_name}")
+                    else:
+                        print(f"    No mediation policies found at API level")
+                
+                # If still no endpoint found, use backend or mark as no endpoint
+                if not found_endpoint:
+                    print(f"    No policies with rootHost found, using backend or no endpoint")
                     if backend_url:
                         results.append({
                             'api_id': api_id,
