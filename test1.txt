@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 WSO2 API Manager 4.2 - Policy Endpoint Extractor
-Corrected version based on working code
+Basic Authentication Only - Fixed Version
 """
 
 import requests
@@ -16,6 +16,7 @@ import io
 import csv
 import sys
 import re
+import yaml
 
 def create_config():
     config = {
@@ -24,9 +25,7 @@ def create_config():
         "password": "admin",
         "verify_ssl": False,
         "output_csv": "wso2_policy_endpoints.csv",
-        "auth_method": "auto",
         "instructions": {
-            "auth_method": "Options: auto, client_credentials, password, basic_auth",
             "publisher_url": "WSO2 API Manager base URL",
             "username": "WSO2 username with admin/publisher access",
             "password": "WSO2 password",
@@ -38,11 +37,6 @@ def create_config():
         json.dump(config, f, indent=4)
     print("Config file created: policy_config.json")
     print("Please update with your WSO2 details")
-    print("\nAuthentication methods:")
-    print("- auto: Try all methods automatically (recommended)")
-    print("- client_credentials: Register app and use client credentials")
-    print("- password: Use password grant with default clients")
-    print("- basic_auth: Use basic authentication directly")
 
 class WSO2APIManager:
     def __init__(self):
@@ -54,304 +48,33 @@ class WSO2APIManager:
         self.password = self.config['password']
         self.verify_ssl = self.config.get('verify_ssl', True)
         
-        self.access_token = None
-        self.client_id = None
-        self.client_secret = None
-        self.use_basic_auth = False
         self.session = requests.Session()
         self.session.verify = self.verify_ssl
         
         if not self.verify_ssl:
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
+        # Use basic authentication only
+        auth_header = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
+        self.auth_header = f"Basic {auth_header}"
+        
         self.publisher_url = f"{self.base_url}/api/am/publisher/v4"
-    
-    def get_access_token(self):
-        try:
-            # Method 1: Try with application registration first
-            if self.register_application():
-                print("Using registered application credentials")
-                return self.get_token_with_client_credentials()
-            
-            # Method 2: Try with admin credentials directly
-            print("Trying direct admin authentication")
-            return self.get_token_with_admin_credentials()
-            
-        except Exception as e:
-            print(f"Error getting token: {str(e)}")
-            return False
-    
-    def register_application(self):
-        """Register a new application to get client credentials"""
-        try:
-            print("Attempting to register application...")
-            auth_header = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
-            
-            # Try different registration endpoints
-            registration_endpoints = [
-                f"{self.base_url}/client-registration/v0.17/register",
-                f"{self.base_url}/client-registration/v0.16/register", 
-                f"{self.base_url}/client-registration/v0.15/register"
-            ]
-            
-            headers = {
-                'Authorization': f'Basic {auth_header}',
-                'Content-Type': 'application/json'
-            }
-            
-            app_data = {
-                "clientName": "WSO2_Policy_Extractor",
-                "callbackUrl": "https://localhost",
-                "grantType": "client_credentials password",
-                "saasApp": True
-            }
-            
-            for endpoint in registration_endpoints:
-                print(f"Trying registration endpoint: {endpoint}")
-                try:
-                    response = self.session.post(endpoint, headers=headers, json=app_data)
-                    print(f"Registration response: {response.status_code}")
-                    
-                    if response.status_code == 201:
-                        app_info = response.json()
-                        self.client_id = app_info.get('clientId')
-                        self.client_secret = app_info.get('clientSecret')
-                        print(f"Application registered successfully with client ID: {self.client_id}")
-                        return True
-                    else:
-                        print(f"Registration failed: {response.text}")
-                except Exception as e:
-                    print(f"Error with endpoint {endpoint}: {str(e)}")
-                    continue
-            
-            return False
-                
-        except Exception as e:
-            print(f"Error registering application: {str(e)}")
-            return False
-    
-    def get_token_with_client_credentials(self):
-        """Get token using registered client credentials"""
-        try:
-            auth_header = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
-            
-            token_url = f"{self.base_url}/oauth2/token"
-            headers = {
-                'Authorization': f'Basic {auth_header}',
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-            data = {
-                'grant_type': 'client_credentials',
-                'scope': 'apim:api_view apim:api_create apim:api_publish'
-            }
-            
-            response = self.session.post(token_url, headers=headers, data=data)
-            if response.status_code == 200:
-                token_data = response.json()
-                self.access_token = token_data.get('access_token')
-                print("Access token obtained with client credentials")
-                return True
-            else:
-                print(f"Failed to get token with client credentials: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"Error getting token with client credentials: {str(e)}")
-            return False
-    
-    def get_token_with_admin_credentials(self):
-        """Get token using admin username/password directly"""
-        try:
-            print("Trying direct admin authentication methods...")
-            
-            # Method 1: Try with admin user as OAuth client
-            print("Method 1: Using admin credentials as OAuth client...")
-            if self.try_admin_as_oauth_client():
-                return True
-            
-            # Method 2: Try getting client credentials from Carbon Console
-            print("Method 2: Trying to get existing client credentials...")
-            if self.try_existing_clients():
-                return True
-            
-            # Method 3: Try with default service provider
-            print("Method 3: Trying default service providers...")
-            if self.try_service_providers():
-                return True
-            
-            print("All OAuth methods failed, falling back to basic auth...")
-            return self.try_basic_auth()
-            
-        except Exception as e:
-            print(f"Error with admin credentials: {str(e)}")
-            return False
-    
-    def try_admin_as_oauth_client(self):
-        """Try using admin username/password as direct OAuth client"""
-        try:
-            # In some WSO2 setups, admin user can be used directly
-            token_url = f"{self.base_url}/oauth2/token"
-            
-            # Try without client credentials (direct admin)
-            headers = {
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-            data = {
-                'grant_type': 'password',
-                'username': self.username,
-                'password': self.password,
-                'scope': 'apim:api_view apim:api_create apim:api_publish'
-            }
-            
-            response = self.session.post(token_url, headers=headers, data=data)
-            if response.status_code == 200:
-                token_data = response.json()
-                self.access_token = token_data.get('access_token')
-                print("✅ Direct admin authentication successful")
-                return True
-            else:
-                print(f"❌ Direct admin auth failed: {response.status_code}")
-                return False
-                
-        except Exception as e:
-            print(f"Error with direct admin auth: {str(e)}")
-            return False
-    
-    def try_existing_clients(self):
-        """Try to use existing OAuth clients"""
-        try:
-            # Known application patterns
-            known_apps = [
-                ('admin_PolicyExtractor', 'admin_PolicyExtractor'),
-                ('WSO2_API_Manager', 'WSO2_API_Manager'),
-                ('DefaultApplication_PRODUCTION', 'DefaultApplication_PRODUCTION'),
-                ('carbon_app', 'carbon_app'),
-                ('admin', 'admin'),
-                ('apim_devportal', 'apim_devportal'),
-                ('apim_publisher', 'apim_publisher'),
-                ('wso2carbon', 'wso2carbon'),
-                ('client', 'client')
-            ]
-            
-            token_url = f"{self.base_url}/oauth2/token"
-            
-            for client_id, client_secret in known_apps:
-                print(f"Trying existing client: {client_id}")
-                auth_header = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-                headers = {
-                    'Authorization': f'Basic {auth_header}',
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
-                data = {
-                    'grant_type': 'password',
-                    'username': self.username,
-                    'password': self.password,
-                    'scope': 'apim:api_view apim:api_create apim:api_publish'
-                }
-                
-                response = self.session.post(token_url, headers=headers, data=data)
-                if response.status_code == 200:
-                    token_data = response.json()
-                    self.access_token = token_data.get('access_token')
-                    print(f"✅ Success with existing client: {client_id}")
-                    return True
-                else:
-                    print(f"❌ Failed with {client_id}: {response.status_code}")
-            
-            return False
-            
-        except Exception as e:
-            print(f"Error trying existing clients: {str(e)}")
-            return False
-    
-    def try_service_providers(self):
-        """Try using service provider applications"""
-        try:
-            # Service providers that might exist in WSO2
-            service_providers = [
-                ('apim_publisher', 'apim_publisher'),
-                ('apim_devportal', 'apim_devportal'), 
-                ('apim_admin', 'apim_admin'),
-                ('wso2am_api_publisher', 'wso2am_api_publisher'),
-                ('wso2am_admin_portal', 'wso2am_admin_portal')
-            ]
-            
-            token_url = f"{self.base_url}/oauth2/token"
-            
-            for sp_client_id, sp_client_secret in service_providers:
-                print(f"Trying service provider: {sp_client_id}")
-                auth_header = base64.b64encode(f"{sp_client_id}:{sp_client_secret}".encode()).decode()
-                
-                headers = {
-                    'Authorization': f'Basic {auth_header}',
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                }
-                
-                # Try both client_credentials and password grants
-                for grant_type in ['client_credentials', 'password']:
-                    data = {
-                        'grant_type': grant_type,
-                        'scope': 'apim:api_view apim:api_create apim:api_publish'
-                    }
-                    
-                    if grant_type == 'password':
-                        data.update({
-                            'username': self.username,
-                            'password': self.password
-                        })
-                    
-                    response = self.session.post(token_url, headers=headers, data=data)
-                    if response.status_code == 200:
-                        token_data = response.json()
-                        self.access_token = token_data.get('access_token')
-                        print(f"✅ Success with service provider {sp_client_id} using {grant_type}")
-                        return True
-                    else:
-                        print(f"❌ Failed {sp_client_id} with {grant_type}: {response.status_code}")
-            
-            return False
-            
-        except Exception as e:
-            print(f"Error with service providers: {str(e)}")
-            return False
-    
-    def try_basic_auth(self):
-        """Try using basic authentication for API calls"""
-        try:
-            print("Trying basic authentication...")
-            # Set up basic auth header for direct use
-            auth_header = base64.b64encode(f"{self.username}:{self.password}".encode()).decode()
-            self.access_token = f"Basic {auth_header}"
-            self.use_basic_auth = True
-            return True
-        except Exception as e:
-            print(f"Error setting up basic auth: {str(e)}")
-            return False
+        print("Using Basic Authentication")
     
     def get_api_headers(self):
-        if hasattr(self, 'use_basic_auth') and self.use_basic_auth:
-            return {
-                'Authorization': self.access_token,  # This is already "Basic base64..."
-                'Content-Type': 'application/json'
-            }
-        else:
-            return {
-                'Authorization': f'Bearer {self.access_token}',
-                'Content-Type': 'application/json'
-            }
+        return {
+            'Authorization': self.auth_header,
+            'Content-Type': 'application/json'
+        }
     
     def get_all_apis(self):
-        if not self.access_token:
-            if not self.get_access_token():
-                return []
-        
         try:
             url = f"{self.publisher_url}/apis"
             headers = self.get_api_headers()
             
             all_apis = []
             offset = 0
-            limit = 100
+            limit = 500  # Increased limit to get more APIs per request
             
             while True:
                 params = {'limit': limit, 'offset': offset}
@@ -362,14 +85,17 @@ class WSO2APIManager:
                     apis = data.get('list', [])
                     all_apis.extend(apis)
                     
+                    print(f"Retrieved {len(apis)} APIs (offset: {offset})")
+                    
+                    # Check if we have more APIs to fetch
                     if len(apis) < limit:
                         break
                     offset += limit
                 else:
-                    print(f"Failed to get APIs: {response.status_code}")
+                    print(f"Failed to get APIs: {response.status_code} - {response.text}")
                     break
             
-            print(f"Found {len(all_apis)} APIs")
+            print(f"Total APIs found: {len(all_apis)}")
             return all_apis
         except Exception as e:
             print(f"Error getting APIs: {str(e)}")
@@ -383,8 +109,11 @@ class WSO2APIManager:
             
             if response.status_code == 200:
                 return response.json()
-            return None
-        except:
+            else:
+                print(f"Failed to get API details for {api_id}: {response.status_code}")
+                return None
+        except Exception as e:
+            print(f"Error getting API details for {api_id}: {str(e)}")
             return None
     
     def get_mediation_policies(self, api_id):
@@ -396,7 +125,7 @@ class WSO2APIManager:
             if response.status_code == 200:
                 return response.json()
             return {'list': []}
-        except:
+        except Exception as e:
             return {'list': []}
     
     def get_operation_policy_content(self, api_id, policy_id):
@@ -406,7 +135,7 @@ class WSO2APIManager:
             if response.status_code == 200:
                 return response.content
             return None
-        except:
+        except Exception as e:
             return None
     
     def download_mediation_policy(self, api_id, policy_id):
@@ -418,7 +147,7 @@ class WSO2APIManager:
             if response.status_code == 200:
                 return response.text
             return None
-        except:
+        except Exception as e:
             return None
     
     def decompress_policy_content(self, compressed_content):
@@ -426,36 +155,44 @@ class WSO2APIManager:
             with zipfile.ZipFile(io.BytesIO(compressed_content)) as zip_file:
                 file_list = zip_file.namelist()
                 
+                # Look for YAML files first (contains parameters)
+                for filename in file_list:
+                    if filename.endswith('.yaml') or filename.endswith('.yml'):
+                        with zip_file.open(filename) as file:
+                            content = file.read().decode('utf-8')
+                            print(f"Found YAML file: {filename}")
+                            return content
+                
+                # Then look for j2 files
                 for filename in file_list:
                     if filename.endswith('.j2'):
                         with zip_file.open(filename) as file:
                             return file.read().decode('utf-8')
                 
+                # Then XML files
                 for filename in file_list:
                     if filename.endswith('.xml'):
                         with zip_file.open(filename) as file:
                             return file.read().decode('utf-8')
                 
-                for filename in file_list:
-                    if filename.endswith('.yaml') or filename.endswith('.yml'):
-                        with zip_file.open(filename) as file:
-                            return file.read().decode('utf-8')
-                
+                # Get first file if no specific types found
                 if file_list:
                     with zip_file.open(file_list[0]) as file:
                         return file.read().decode('utf-8')
-        except:
+        except zipfile.BadZipFile:
             pass
+        except Exception as e:
+            print(f"ZIP extraction error: {str(e)}")
         
         try:
             decompressed = gzip.decompress(compressed_content)
             return decompressed.decode('utf-8')
-        except:
+        except Exception:
             pass
         
         try:
             return compressed_content.decode('utf-8')
-        except:
+        except Exception:
             pass
         
         return None
@@ -466,10 +203,10 @@ class WSO2APIManager:
             if compressed_content:
                 return self.decompress_policy_content(compressed_content)
             return None
-        except:
+        except Exception as e:
             return None
     
-    def extract_roothost_from_policy_content(self, policy_content):
+    def extract_roothost_from_policy_content(self, policy_content, policy_name):
         if not policy_content:
             return "", "no_content"
         
@@ -477,8 +214,43 @@ class WSO2APIManager:
             roothost_value = ""
             endpoint_type = "unknown"
             
-            # Pattern 1: Your specific rootHost property format
-            # <property name="rootHost" scope="default" type="STRING" value="{{rootHost}}"/>
+            # Check if this is the specific rootHost policy
+            if "1VitalitySetRootHostAllMANDATORY" in policy_name or "rootHost" in policy_name:
+                print(f"Processing rootHost policy: {policy_name}")
+                
+                # Look for YAML parameters section
+                if 'parameters:' in policy_content or 'roothost:' in policy_content.lower():
+                    try:
+                        # Try to parse as YAML
+                        yaml_content = yaml.safe_load(policy_content)
+                        if isinstance(yaml_content, dict):
+                            # Look for parameters section
+                            if 'parameters' in yaml_content:
+                                params = yaml_content['parameters']
+                                if 'roothost' in params:
+                                    roothost_value = params['roothost']
+                                    endpoint_type = "operation_policy_yaml_roothost"
+                                    print(f"Found YAML roothost parameter: {roothost_value}")
+                                    return roothost_value.strip(), endpoint_type
+                    except yaml.YAMLError:
+                        pass
+                    
+                    # Try regex patterns for YAML format
+                    yaml_patterns = [
+                        r'parameters:\s*\n\s*roothost:\s*([^\n\r]+)',
+                        r'roothost:\s*([^\n\r]+)',
+                        r'rootHost:\s*([^\n\r]+)',
+                    ]
+                    
+                    for pattern in yaml_patterns:
+                        matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
+                        if matches:
+                            roothost_value = matches[0].strip()
+                            endpoint_type = "operation_policy_yaml_roothost"
+                            print(f"Found YAML roothost with regex: {roothost_value}")
+                            return roothost_value.strip(), endpoint_type
+            
+            # Pattern 1: XML property format
             roothost_property_patterns = [
                 r'<property[^>]*name=["\']rootHost["\'][^>]*value=["\']([^"\']+)["\']',
                 r'<property[^>]*name=["\']roothost["\'][^>]*value=["\']([^"\']+)["\']',
@@ -489,108 +261,55 @@ class WSO2APIManager:
                 matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
                 if matches:
                     roothost_value = matches[0]
-                    endpoint_type = "operation_policy_roothost_property"
-                    print(f"Found rootHost property: {roothost_value}")
+                    endpoint_type = "operation_policy_xml_property"
+                    print(f"Found XML rootHost property: {roothost_value}")
                     break
             
-            # Pattern 2: Standard hardcoded URLs in address elements
-            if not roothost_value:
-                url_patterns = [
-                    r'<address\s+uri=["\']([^"\']+)["\']',
-                    r'<endpoint[^>]*>.*?<address[^>]+uri=["\']([^"\']+)["\']',
-                    r'<property[^>]*value=["\']([^"\']*https?://[^"\']+)["\']',
-                    r'https?://[^\s<>"\']+',
-                ]
-                
-                for pattern in url_patterns:
-                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
-                    if matches:
-                        roothost_value = matches[0] if isinstance(matches[0], str) else str(matches[0])
-                        endpoint_type = "operation_policy_hardcoded_url"
-                        break
-            
-            # Pattern 3: Template variables like {{rootHost}}, ${rootHost}
+            # Pattern 2: Template variables
             if not roothost_value:
                 template_patterns = [
-                    r'\{\{([^}]*[Rr]oot[Hh]ost[^}]*)\}\}',  # {{rootHost}} variations
-                    r'\{\{([^}]*[Hh]ost[^}]*)\}\}',         # {{host}} variations
-                    r'\{\{([^}]*[Ee]ndpoint[^}]*)\}\}',     # {{endpoint}} variations
-                    r'\$\{([^}]*[Rr]oot[Hh]ost[^}]*)\}',   # ${rootHost} variations
-                    r'\$\{([^}]*[Hh]ost[^}]*)\}',          # ${host} variations
-                    r'\$\{([^}]*[Ee]ndpoint[^}]*)\}',      # ${endpoint} variations
+                    r'\{\{([^}]*[Rr]oot[Hh]ost[^}]*)\}\}',
+                    r'\{\{([^}]*[Hh]ost[^}]*)\}\}',
+                    r'\{\{([^}]*[Ee]ndpoint[^}]*)\}\}',
+                    r'\$\{([^}]*[Rr]oot[Hh]ost[^}]*)\}',
+                    r'\$\{([^}]*[Hh]ost[^}]*)\}',
                 ]
                 
                 for pattern in template_patterns:
                     matches = re.findall(pattern, policy_content, re.IGNORECASE)
                     if matches:
                         match = matches[0]
-                        if 'roothost' in match.lower() or 'host' in match.lower() or 'endpoint' in match.lower():
-                            # Preserve the original template format
+                        if 'roothost' in match.lower() or 'host' in match.lower():
                             if '{{' in policy_content:
                                 roothost_value = f"{{{{{match}}}}}"
                             else:
                                 roothost_value = f"${{{match}}}"
-                            endpoint_type = "operation_policy_dynamic_template"
+                            endpoint_type = "operation_policy_template"
                             print(f"Found template variable: {roothost_value}")
                             break
                     if roothost_value:
                         break
             
-            # Pattern 4: YAML parameter references
-            if not roothost_value and ('yaml' in policy_content.lower() or 'parameters:' in policy_content):
-                yaml_patterns = [
-                    r'rootHost:\s*([^\n\r]+)',
-                    r'root_host:\s*([^\n\r]+)',
-                    r'endpoint:\s*([^\n\r]+)',
-                    r'host:\s*([^\n\r]+)',
-                    r'baseUrl:\s*([^\n\r]+)',
-                    r'base_url:\s*([^\n\r]+)',
-                ]
-                
-                for pattern in yaml_patterns:
-                    matches = re.findall(pattern, policy_content, re.IGNORECASE)
-                    if matches:
-                        roothost_value = matches[0].strip()
-                        endpoint_type = "operation_policy_yaml_parameter"
-                        print(f"Found YAML parameter: {roothost_value}")
-                        break
-            
-            # Pattern 5: XML parameter elements
+            # Pattern 3: Hardcoded URLs
             if not roothost_value:
-                param_patterns = [
-                    r'<parameter[^>]*name=["\']([^"\']*[Rr]oot[Hh]ost[^"\']*)["\'][^>]*>([^<]+)',
-                    r'<parameter[^>]*name=["\']([^"\']*[Hh]ost[^"\']*)["\'][^>]*>([^<]+)',
-                    r'<parameter[^>]*name=["\']([^"\']*[Ee]ndpoint[^"\']*)["\'][^>]*>([^<]+)',
+                url_patterns = [
+                    r'<address\s+uri=["\']([^"\']+)["\']',
+                    r'<endpoint[^>]*>.*?<address[^>]+uri=["\']([^"\']+)["\']',
+                    r'<property[^>]*value=["\']([^"\']*https?://[^"\']+)["\']',
                 ]
                 
-                for pattern in param_patterns:
-                    matches = re.findall(pattern, policy_content, re.IGNORECASE)
-                    if matches:
-                        roothost_value = matches[0][1] if len(matches[0]) > 1 else str(matches[0])
-                        endpoint_type = "operation_parameter"
-                        print(f"Found parameter: {roothost_value}")
-                        break
-            
-            # Pattern 6: Look for any property with URI-like values
-            if not roothost_value:
-                generic_patterns = [
-                    r'<property[^>]*value=["\']([^"\']*\{\{[^}]*\}\}[^"\']*)["\']',  # Any {{}} in properties
-                    r'<property[^>]*value=["\']([^"\']*\$\{[^}]*\}[^"\']*)["\']',   # Any ${} in properties
-                    r'value=["\']([^"\']*https?://[^"\']*)["\']',                   # Any HTTP URLs
-                ]
-                
-                for pattern in generic_patterns:
-                    matches = re.findall(pattern, policy_content, re.IGNORECASE)
+                for pattern in url_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
                     if matches:
                         roothost_value = matches[0]
-                        endpoint_type = "operation_policy_generic_property"
-                        print(f"Found generic property: {roothost_value}")
+                        endpoint_type = "operation_policy_hardcoded"
+                        print(f"Found hardcoded URL: {roothost_value}")
                         break
             
             return roothost_value.strip(), endpoint_type
             
         except Exception as e:
-            print(f"Error extracting roothost: {str(e)}")
+            print(f"Error extracting roothost from {policy_name}: {str(e)}")
             return "", "extraction_error"
     
     def analyze_api(self, api_id, api_name, api_version):
@@ -599,8 +318,9 @@ class WSO2APIManager:
         try:
             api_details = self.get_api_details(api_id)
             if not api_details:
-                return []
+                return results
             
+            # Get backend endpoint
             backend_url = ""
             has_backend_conf = False
             backend_endpoints = api_details.get('endpointConfig', {})
@@ -622,7 +342,7 @@ class WSO2APIManager:
                     'resource_method': 'N/A',
                     'current_endpoint': backend_url,
                     'new_endpoint': backend_url,
-                    'endpoint_type': 'no_endpoint',
+                    'endpoint_type': 'no_operations',
                     'api_type': 'no_operations_defined',
                     'policy_name': 'N/A',
                     'policy_attribute': 'N/A',
@@ -632,217 +352,106 @@ class WSO2APIManager:
                 })
                 return results
             
+            # Get all unique policies for this API first
+            api_policies = {}
+            
+            # Check operation policies
             for operation in operations:
-                resource_path = operation.get('target', '/')
-                resource_method = operation.get('verb', 'GET')
                 operation_policies = operation.get('operationPolicies', {})
-                
                 request_policies = operation_policies.get('request', [])
                 response_policies = operation_policies.get('response', [])
                 all_operation_policies = request_policies + response_policies
-                operation_policy_count = len(all_operation_policies)
                 
-                has_policy_parameter = False
                 for policy in all_operation_policies:
-                    if policy.get('parameters') or 'parameter' in str(policy).lower():
-                        has_policy_parameter = True
-                        break
-                
-                if all_operation_policies:
-                    for policy in all_operation_policies:
-                        policy_id = policy.get('policyId', '')
-                        policy_name = policy.get('policyName', '')
-                        policy_attribute = "operation_policy"
+                    policy_id = policy.get('policyId', '')
+                    policy_name = policy.get('policyName', '')
+                    if policy_id and policy_id not in api_policies:
+                        policy_content = self.download_operation_policy_content(api_id, policy_id)
+                        roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content, policy_name)
                         
-                        if policy_id:
-                            policy_content = self.download_operation_policy_content(api_id, policy_id)
-                            
-                            if policy_content:
-                                roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content)
-                                
-                                if not has_policy_parameter and ('parameter' in policy_content.lower() or 'param' in policy_content.lower()):
-                                    has_policy_parameter = True
-                                
-                                if 'hardcoded' in endpoint_type:
-                                    api_type = "operation_policy_based"
-                                    final_endpoint_type = "operation_policy_hardcoded"
-                                elif 'parameter' in endpoint_type:
-                                    api_type = "operation_parameter_based"
-                                    final_endpoint_type = "operation_parameter"
-                                elif 'dynamic' in endpoint_type or 'template' in endpoint_type:
-                                    api_type = "operation_policy_based"
-                                    final_endpoint_type = "operation_policy_dynamic"
-                                elif 'yaml' in endpoint_type:
-                                    api_type = "operation_policy_based"
-                                    final_endpoint_type = "operation_policy_yaml"
-                                elif 'roothost' in endpoint_type:
-                                    api_type = "operation_policy_based"
-                                    final_endpoint_type = "operation_policy_roothost"
-                                else:
-                                    api_type = "operation_policy_based"
-                                    final_endpoint_type = "operation_policy_unknown"
-                                
-                                # Use extracted endpoint for both current and new endpoint
-                                extracted_endpoint = roothost_value if roothost_value else backend_url
-                                
-                                results.append({
-                                    'api_id': api_id,
-                                    'api_name': api_name,
-                                    'api_version': api_version,
-                                    'api_context': api_details.get('context', ''),
-                                    'resource_path': resource_path,
-                                    'resource_method': resource_method,
-                                    'current_endpoint': extracted_endpoint,
-                                    'new_endpoint': extracted_endpoint,
-                                    'endpoint_type': final_endpoint_type,
-                                    'api_type': api_type,
-                                    'policy_name': policy_name,
-                                    'policy_attribute': policy_attribute,
-                                    'operation_policy_count': operation_policy_count,
-                                    'has_backend_conf': has_backend_conf,
-                                    'has_policy_parameter': has_policy_parameter
-                                })
-                            else:
-                                # No policy content found
-                                results.append({
-                                    'api_id': api_id,
-                                    'api_name': api_name,
-                                    'api_version': api_version,
-                                    'api_context': api_details.get('context', ''),
-                                    'resource_path': resource_path,
-                                    'resource_method': resource_method,
-                                    'current_endpoint': backend_url,
-                                    'new_endpoint': backend_url,
-                                    'endpoint_type': 'operation_policy_no_content',
-                                    'api_type': 'operation_policy_based',
-                                    'policy_name': policy_name,
-                                    'policy_attribute': policy_attribute,
-                                    'operation_policy_count': operation_policy_count,
-                                    'has_backend_conf': has_backend_conf,
-                                    'has_policy_parameter': has_policy_parameter
-                                })
-                else:
-                    old_api_policies = self.get_mediation_policies(api_id)
-                    mediation_policy_count = len(old_api_policies.get('list', []))
+                        api_policies[policy_id] = {
+                            'policy_name': policy_name,
+                            'policy_attribute': 'operation_policy',
+                            'roothost_value': roothost_value,
+                            'endpoint_type': endpoint_type,
+                            'has_parameters': bool('parameter' in str(policy_content).lower() if policy_content else False)
+                        }
+            
+            # Check mediation policies
+            mediation_policies = self.get_mediation_policies(api_id)
+            for policy in mediation_policies.get('list', []):
+                policy_id = policy.get('id', '')
+                policy_name = policy.get('name', '')
+                if policy_id and policy_id not in api_policies:
+                    policy_content = self.download_mediation_policy(api_id, policy_id)
+                    roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content, policy_name)
                     
-                    has_mediation_policy_parameter = False
-                    if old_api_policies and old_api_policies.get('list'):
-                        for policy in old_api_policies['list']:
-                            policy_content_check = self.download_mediation_policy(api_id, policy.get('id', ''))
-                            if policy_content_check and ('parameter' in policy_content_check.lower() or 'param' in policy_content_check.lower()):
-                                has_mediation_policy_parameter = True
-                                break
+                    api_policies[policy_id] = {
+                        'policy_name': policy_name,
+                        'policy_attribute': 'mediation_policy',
+                        'roothost_value': roothost_value,
+                        'endpoint_type': endpoint_type,
+                        'has_parameters': bool('parameter' in str(policy_content).lower() if policy_content else False)
+                    }
+            
+            # If no policies found, create one record for the API
+            if not api_policies:
+                results.append({
+                    'api_id': api_id,
+                    'api_name': api_name,
+                    'api_version': api_version,
+                    'api_context': api_details.get('context', ''),
+                    'resource_path': f"{len(operations)} resources",
+                    'resource_method': 'ALL',
+                    'current_endpoint': backend_url,
+                    'new_endpoint': backend_url,
+                    'endpoint_type': 'backend_config' if backend_url else 'no_endpoint',
+                    'api_type': 'backend_endpoint_based' if backend_url else 'no_endpoint_configured',
+                    'policy_name': 'N/A',
+                    'policy_attribute': 'N/A',
+                    'operation_policy_count': 0,
+                    'has_backend_conf': has_backend_conf,
+                    'has_policy_parameter': False
+                })
+            else:
+                # Create one record per unique policy
+                for policy_id, policy_info in api_policies.items():
+                    endpoint_value = policy_info['roothost_value'] if policy_info['roothost_value'] else backend_url
                     
-                    if old_api_policies and old_api_policies.get('list'):
-                        for policy in old_api_policies['list']:
-                            policy_id = policy.get('id', '')
-                            policy_name = policy.get('name', '')
-                            policy_attribute = "mediation_policy"
-                            
-                            if policy_id:
-                                policy_content = self.download_mediation_policy(api_id, policy_id)
-                                
-                                if policy_content:
-                                    roothost_value, endpoint_type = self.extract_roothost_from_policy_content(policy_content)
-                                    
-                                    if 'parameter' in policy_content.lower() or 'param' in policy_content.lower():
-                                        has_mediation_policy_parameter = True
-                                    
-                                    if 'hardcoded' in endpoint_type:
-                                        api_type = "mediation_policy_based"
-                                        final_endpoint_type = "mediation_policy_hardcoded"
-                                    elif 'parameter' in endpoint_type:
-                                        api_type = "mediation_parameter_based"
-                                        final_endpoint_type = "mediation_parameter"
-                                    elif 'dynamic' in endpoint_type or 'template' in endpoint_type:
-                                        api_type = "mediation_policy_based"
-                                        final_endpoint_type = "mediation_policy_dynamic"
-                                    elif 'yaml' in endpoint_type:
-                                        api_type = "mediation_policy_based"
-                                        final_endpoint_type = "mediation_policy_yaml"
-                                    elif 'roothost' in endpoint_type:
-                                        api_type = "mediation_policy_based"
-                                        final_endpoint_type = "mediation_policy_roothost"
-                                    else:
-                                        api_type = "mediation_policy_based"
-                                        final_endpoint_type = "mediation_policy_unknown"
-                                    
-                                    # Use extracted endpoint for both current and new endpoint
-                                    extracted_endpoint = roothost_value if roothost_value else backend_url
-                                    
-                                    results.append({
-                                        'api_id': api_id,
-                                        'api_name': api_name,
-                                        'api_version': api_version,
-                                        'api_context': api_details.get('context', ''),
-                                        'resource_path': resource_path,
-                                        'resource_method': resource_method,
-                                        'current_endpoint': extracted_endpoint,
-                                        'new_endpoint': extracted_endpoint,
-                                        'endpoint_type': final_endpoint_type,
-                                        'api_type': api_type,
-                                        'policy_name': policy_name,
-                                        'policy_attribute': policy_attribute,
-                                        'operation_policy_count': mediation_policy_count,
-                                        'has_backend_conf': has_backend_conf,
-                                        'has_policy_parameter': has_mediation_policy_parameter
-                                    })
-                                else:
-                                    # No mediation policy content found
-                                    results.append({
-                                        'api_id': api_id,
-                                        'api_name': api_name,
-                                        'api_version': api_version,
-                                        'api_context': api_details.get('context', ''),
-                                        'resource_path': resource_path,
-                                        'resource_method': resource_method,
-                                        'current_endpoint': backend_url,
-                                        'new_endpoint': backend_url,
-                                        'endpoint_type': 'mediation_policy_no_content',
-                                        'api_type': 'mediation_policy_based',
-                                        'policy_name': policy_name,
-                                        'policy_attribute': policy_attribute,
-                                        'operation_policy_count': mediation_policy_count,
-                                        'has_backend_conf': has_backend_conf,
-                                        'has_policy_parameter': has_mediation_policy_parameter
-                                    })
+                    # Determine API type
+                    if 'roothost' in policy_info['endpoint_type']:
+                        api_type = "operation_policy_based"
+                        final_endpoint_type = "operation_policy_roothost"
+                    elif 'template' in policy_info['endpoint_type']:
+                        api_type = "operation_policy_based"
+                        final_endpoint_type = "operation_policy_template"
+                    elif 'hardcoded' in policy_info['endpoint_type']:
+                        api_type = "operation_policy_based"
+                        final_endpoint_type = "operation_policy_hardcoded"
+                    elif policy_info['policy_attribute'] == 'mediation_policy':
+                        api_type = "mediation_policy_based"
+                        final_endpoint_type = "mediation_policy"
                     else:
-                        if backend_url:
-                            results.append({
-                                'api_id': api_id,
-                                'api_name': api_name,
-                                'api_version': api_version,
-                                'api_context': api_details.get('context', ''),
-                                'resource_path': resource_path,
-                                'resource_method': resource_method,
-                                'current_endpoint': backend_url,
-                                'new_endpoint': backend_url,
-                                'endpoint_type': 'backend_config',
-                                'api_type': 'backend_endpoint_based',
-                                'policy_name': 'N/A',
-                                'policy_attribute': 'N/A',
-                                'operation_policy_count': 0,
-                                'has_backend_conf': has_backend_conf,
-                                'has_policy_parameter': False
-                            })
-                        else:
-                            results.append({
-                                'api_id': api_id,
-                                'api_name': api_name,
-                                'api_version': api_version,
-                                'api_context': api_details.get('context', ''),
-                                'resource_path': resource_path,
-                                'resource_method': resource_method,
-                                'current_endpoint': '',
-                                'new_endpoint': '',
-                                'endpoint_type': 'no_endpoint',
-                                'api_type': 'no_endpoint_configured',
-                                'policy_name': 'N/A',
-                                'policy_attribute': 'N/A',
-                                'operation_policy_count': 0,
-                                'has_backend_conf': has_backend_conf,
-                                'has_policy_parameter': False
-                            })
+                        api_type = "policy_based"
+                        final_endpoint_type = policy_info['endpoint_type']
+                    
+                    results.append({
+                        'api_id': api_id,
+                        'api_name': api_name,
+                        'api_version': api_version,
+                        'api_context': api_details.get('context', ''),
+                        'resource_path': f"{len(operations)} resources",
+                        'resource_method': 'ALL',
+                        'current_endpoint': endpoint_value,
+                        'new_endpoint': endpoint_value,
+                        'endpoint_type': final_endpoint_type,
+                        'api_type': api_type,
+                        'policy_name': policy_info['policy_name'],
+                        'policy_attribute': policy_info['policy_attribute'],
+                        'operation_policy_count': len(api_policies),
+                        'has_backend_conf': has_backend_conf,
+                        'has_policy_parameter': policy_info['has_parameters']
+                    })
         
         except Exception as e:
             print(f"Error analyzing API {api_id}: {str(e)}")
@@ -868,9 +477,6 @@ class WSO2APIManager:
     
     def process_all_apis(self):
         try:
-            if not self.get_access_token():
-                return []
-            
             all_apis = self.get_all_apis()
             if not all_apis:
                 return []
@@ -918,6 +524,7 @@ class WSO2APIManager:
 
 def main():
     print("WSO2 API Manager 4.2 - Policy Endpoint Extractor")
+    print("Basic Authentication Only")
     print("=" * 50)
     
     if len(sys.argv) > 1 and sys.argv[1] == "--create-config":
@@ -948,9 +555,17 @@ def main():
             
             operation_policies = [d for d in data if d.get('policy_attribute') == 'operation_policy']
             mediation_policies = [d for d in data if d.get('policy_attribute') == 'mediation_policy']
+            roothost_policies = [d for d in data if 'roothost' in d.get('endpoint_type', '').lower()]
             
             print(f"Operation policies: {len(operation_policies)}")
             print(f"Mediation policies: {len(mediation_policies)}")
+            print(f"RootHost policies found: {len(roothost_policies)}")
+            
+            if roothost_policies:
+                print("\nRootHost policies:")
+                for policy in roothost_policies[:5]:  # Show first 5
+                    print(f"  - {policy['api_name']}: {policy['policy_name']} -> {policy['current_endpoint']}")
+            
             print(f"Output file: {output_file}")
             print("\nCompleted successfully!")
         else:
