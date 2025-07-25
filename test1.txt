@@ -257,9 +257,50 @@ class WSO2APIManager:
             endpoint_type = "unknown"
             
             print(f"Analyzing policy: {policy_name}")
-            print(f"Content preview: {policy_content[:200]}...")
+            print(f"Content preview: {policy_content[:300]}...")
             
-            # Pattern 1: Look for rootHost in J2 template files (most common for mediation policies)
+            # Pattern 1: NEW APIs - Look for YAML parameters section with rootHost value
+            if 'parameters:' in policy_content and 'rootHost:' in policy_content:
+                try:
+                    # Try to parse as YAML first
+                    yaml_content = yaml.safe_load(policy_content)
+                    if isinstance(yaml_content, dict):
+                        # Look for operation policies with parameters
+                        if 'operationPolicies' in yaml_content:
+                            op_policies = yaml_content['operationPolicies']
+                            if 'request' in op_policies:
+                                for policy in op_policies['request']:
+                                    if 'parameters' in policy and 'rootHost' in policy['parameters']:
+                                        roothost_value = policy['parameters']['rootHost']
+                                        endpoint_type = "operation_policy_yaml_roothost"
+                                        print(f"Found YAML rootHost parameter: {roothost_value}")
+                                        return roothost_value.strip(), endpoint_type
+                        
+                        # Also check direct parameters section
+                        if 'parameters' in yaml_content and 'rootHost' in yaml_content['parameters']:
+                            roothost_value = yaml_content['parameters']['rootHost']
+                            endpoint_type = "operation_policy_yaml_roothost"
+                            print(f"Found YAML rootHost parameter: {roothost_value}")
+                            return roothost_value.strip(), endpoint_type
+                except yaml.YAMLError as e:
+                    print(f"YAML parsing error: {e}")
+                
+                # Try regex patterns for YAML format if YAML parsing fails
+                yaml_patterns = [
+                    r'parameters:\s*\n\s*rootHost:\s*([^\n\r]+)',
+                    r'rootHost:\s*([^\n\r]+)',
+                    r'roothost:\s*([^\n\r]+)',
+                ]
+                
+                for pattern in yaml_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
+                    if matches:
+                        roothost_value = matches[0].strip().strip('"\'')
+                        endpoint_type = "operation_policy_yaml_roothost"
+                        print(f"Found YAML rootHost with regex: {roothost_value}")
+                        return roothost_value.strip(), endpoint_type
+            
+            # Pattern 2: Look for rootHost in J2 template files (for mediation policies)
             j2_patterns = [
                 r'rootHost["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # rootHost = "value" or rootHost: "value"
                 r'roothost["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # case insensitive
@@ -274,38 +315,6 @@ class WSO2APIManager:
                     endpoint_type = "mediation_policy_j2_roothost"
                     print(f"Found J2 rootHost: {roothost_value}")
                     return roothost_value, endpoint_type
-            
-            # Pattern 2: YAML parameters section (for operation policies)
-            if 'parameters:' in policy_content or 'roothost:' in policy_content.lower():
-                try:
-                    # Try to parse as YAML
-                    yaml_content = yaml.safe_load(policy_content)
-                    if isinstance(yaml_content, dict):
-                        # Look for parameters section
-                        if 'parameters' in yaml_content:
-                            params = yaml_content['parameters']
-                            if 'roothost' in params:
-                                roothost_value = params['roothost']
-                                endpoint_type = "operation_policy_yaml_roothost"
-                                print(f"Found YAML roothost parameter: {roothost_value}")
-                                return roothost_value.strip(), endpoint_type
-                except yaml.YAMLError as e:
-                    print(f"YAML parsing error: {e}")
-                
-                # Try regex patterns for YAML format
-                yaml_patterns = [
-                    r'parameters:\s*\n\s*roothost:\s*([^\n\r]+)',
-                    r'roothost:\s*([^\n\r]+)',
-                    r'rootHost:\s*([^\n\r]+)',
-                ]
-                
-                for pattern in yaml_patterns:
-                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
-                    if matches:
-                        roothost_value = matches[0].strip().strip('"\'')
-                        endpoint_type = "operation_policy_yaml_roothost"
-                        print(f"Found YAML roothost with regex: {roothost_value}")
-                        return roothost_value.strip(), endpoint_type
             
             # Pattern 3: XML property format (for XML-based mediation policies)
             xml_property_patterns = [
@@ -323,7 +332,7 @@ class WSO2APIManager:
                     print(f"Found XML rootHost property: {roothost_value}")
                     return roothost_value, endpoint_type
             
-            # Pattern 4: Template variables in J2 files
+            # Pattern 4: Template variables in J2 files (should not be used for final value)
             template_patterns = [
                 r'\{\{([^}]*[Rr]oot[Hh]ost[^}]*)\}\}',  # {{ rootHost }}
                 r'\{\{([^}]*[Hh]ost[^}]*)\}\}',         # {{ host }}
@@ -343,6 +352,7 @@ class WSO2APIManager:
                             roothost_value = f"${{{match}}}"
                         endpoint_type = "mediation_policy_j2_template"
                         print(f"Found J2 template variable: {roothost_value}")
+                        # Note: This is a template, not actual value - should only be used for OLD APIs
                         return roothost_value, endpoint_type
             
             # Pattern 5: Direct assignment in J2 files
@@ -377,7 +387,7 @@ class WSO2APIManager:
                     print(f"Found hardcoded URL: {roothost_value}")
                     return roothost_value, endpoint_type
             
-            # Pattern 7: Look for any HTTP/HTTPS URLs in J2 content
+            # Pattern 7: Look for any HTTP/HTTPS URLs in content
             general_url_pattern = r'https?://[^\s<>"\'}\)]+[^\s<>"\'}\)\.,]'
             matches = re.findall(general_url_pattern, policy_content)
             if matches:
