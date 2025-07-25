@@ -165,7 +165,7 @@ class WSO2APIManager:
             return None
     
     def decompress_policy_content(self, compressed_content):
-        """Decompress policy content (handles ZIP and GZIP)"""
+        """Decompress policy content (handles ZIP and GZIP) - Prioritize YAML for NEW APIs"""
         if not compressed_content:
             return None
             
@@ -175,7 +175,26 @@ class WSO2APIManager:
                 file_list = zip_file.namelist()
                 print(f"ZIP contains: {file_list}")
                 
-                # Look for J2 files first (most important for mediation policies)
+                # For NEW APIs - Look for YAML files FIRST (contains actual rootHost values)
+                # NEW APIs have policy names like: 1VitalitySetRootHostA11MANDATORY
+                has_new_api_policy = any('vitality' in filename.lower() and 'roothost' in filename.lower() 
+                                       for filename in file_list)
+                
+                if has_new_api_policy:
+                    print("Detected NEW API policy - prioritizing YAML files")
+                    # Look for YAML files first for NEW APIs
+                    for filename in file_list:
+                        if filename.endswith('.yaml') or filename.endswith('.yml'):
+                            try:
+                                with zip_file.open(filename) as file:
+                                    yaml_content = file.read().decode('utf-8')
+                                    print(f"Extracted YAML from {filename} for NEW API")
+                                    return yaml_content
+                            except Exception as e:
+                                print(f"Error extracting YAML {filename}: {e}")
+                                pass
+                
+                # For OLD APIs or if no YAML found - Look for J2 files first
                 for filename in file_list:
                     if filename.endswith('.j2'):
                         try:
@@ -197,7 +216,7 @@ class WSO2APIManager:
                         except:
                             pass
                 
-                # Then YAML files
+                # Then YAML files (for OLD APIs or fallback)
                 for filename in file_list:
                     if filename.endswith('.yaml') or filename.endswith('.yml'):
                         try:
