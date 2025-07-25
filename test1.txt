@@ -260,45 +260,101 @@ class WSO2APIManager:
             print(f"Content preview: {policy_content[:300]}...")
             
             # Pattern 1: NEW APIs - Look for YAML parameters section with rootHost value
-            if 'parameters:' in policy_content and 'rootHost:' in policy_content:
+            if 'operationPolicies:' in policy_content or 'parameters:' in policy_content:
                 try:
-                    # Try to parse as YAML first
+                    # First try standard YAML parsing
                     yaml_content = yaml.safe_load(policy_content)
                     if isinstance(yaml_content, dict):
                         # Look for operation policies with parameters
                         if 'operationPolicies' in yaml_content:
                             op_policies = yaml_content['operationPolicies']
                             if 'request' in op_policies:
-                                for policy in op_policies['request']:
-                                    if 'parameters' in policy and 'rootHost' in policy['parameters']:
-                                        roothost_value = policy['parameters']['rootHost']
+                                request_policies = op_policies['request']
+                                # Handle both list and single policy formats
+                                if isinstance(request_policies, list):
+                                    for policy in request_policies:
+                                        if 'parameters' in policy and 'rootHost' in policy['parameters']:
+                                            roothost_value = policy['parameters']['rootHost']
+                                            endpoint_type = "operation_policy_yaml_roothost"
+                                            print(f"Found YAML rootHost parameter (list): {roothost_value}")
+                                            return roothost_value.strip(), endpoint_type
+                                elif isinstance(request_policies, dict):
+                                    if 'parameters' in request_policies and 'rootHost' in request_policies['parameters']:
+                                        roothost_value = request_policies['parameters']['rootHost']
                                         endpoint_type = "operation_policy_yaml_roothost"
-                                        print(f"Found YAML rootHost parameter: {roothost_value}")
+                                        print(f"Found YAML rootHost parameter (dict): {roothost_value}")
                                         return roothost_value.strip(), endpoint_type
                         
                         # Also check direct parameters section
                         if 'parameters' in yaml_content and 'rootHost' in yaml_content['parameters']:
                             roothost_value = yaml_content['parameters']['rootHost']
                             endpoint_type = "operation_policy_yaml_roothost"
-                            print(f"Found YAML rootHost parameter: {roothost_value}")
+                            print(f"Found YAML rootHost parameter (direct): {roothost_value}")
                             return roothost_value.strip(), endpoint_type
+                            
                 except yaml.YAMLError as e:
-                    print(f"YAML parsing error: {e}")
+                    print(f"YAML parsing failed: {e}, trying regex patterns")
+                except Exception as e:
+                    print(f"YAML processing error: {e}, trying regex patterns")
                 
-                # Try regex patterns for YAML format if YAML parsing fails
-                yaml_patterns = [
+                # Enhanced regex patterns for your specific format
+                # Handle your format: operationPolicies: request: policyName: ... parameters: rootHost: value
+                enhanced_patterns = [
+                    # Pattern for your specific format without list indicators
+                    r'operationPolicies:\s*\n\s*request:\s*\n(?:.*\n)*?\s*parameters:\s*\n\s*rootHost:\s*([^\n\r]+)',
+                    # Pattern for nested parameters section
                     r'parameters:\s*\n\s*rootHost:\s*([^\n\r]+)',
+                    # Pattern for direct rootHost assignment
                     r'rootHost:\s*([^\n\r]+)',
-                    r'roothost:\s*([^\n\r]+)',
+                    # Pattern with quotes
+                    r'rootHost:\s*["\']([^"\']+)["\']',
+                    # Pattern with spaces around colon
+                    r'rootHost\s*:\s*([^\n\r]+)',
+                    # Case insensitive
+                    r'roothost\s*:\s*([^\n\r]+)',
                 ]
                 
-                for pattern in yaml_patterns:
-                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
+                for pattern in enhanced_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE | re.DOTALL)
                     if matches:
-                        roothost_value = matches[0].strip().strip('"\'')
+                        roothost_value = matches[0].strip().strip('"\'').strip()
                         endpoint_type = "operation_policy_yaml_roothost"
-                        print(f"Found YAML rootHost with regex: {roothost_value}")
-                        return roothost_value.strip(), endpoint_type
+                        print(f"Found YAML rootHost with enhanced regex: {roothost_value}")
+                        return roothost_value, endpoint_type
+                
+                # Try to manually parse the content for your specific format
+                lines = policy_content.split('\n')
+                in_operation_policies = False
+                in_request = False
+                in_parameters = False
+                
+                for i, line in enumerate(lines):
+                    line = line.strip()
+                    
+                    if 'operationPolicies:' in line:
+                        in_operation_policies = True
+                        continue
+                    elif in_operation_policies and 'request:' in line:
+                        in_request = True
+                        continue
+                    elif in_request and 'parameters:' in line:
+                        in_parameters = True
+                        continue
+                    elif in_parameters and 'rootHost:' in line:
+                        # Extract the value after rootHost:
+                        parts = line.split(':', 1)
+                        if len(parts) > 1:
+                            roothost_value = parts[1].strip().strip('"\'')
+                            endpoint_type = "operation_policy_yaml_roothost"
+                            print(f"Found rootHost with manual parsing: {roothost_value}")
+                            return roothost_value, endpoint_type
+                    
+                    # Reset flags if we encounter a new section at the same level
+                    if line and not line.startswith(' ') and not line.startswith('\t'):
+                        if 'operationPolicies:' not in line:
+                            in_operation_policies = False
+                            in_request = False
+                            in_parameters = False
             
             # Pattern 2: Look for rootHost in J2 template files (for mediation policies)
             j2_patterns = [
