@@ -259,43 +259,47 @@ class WSO2APIManager:
             print(f"Analyzing policy: {policy_name}")
             print(f"Content preview: {policy_content[:300]}...")
             
-            # Pattern 1: NEW APIs - Simple direct extraction of rootHost: URL pattern
-            # This will find: rootHost: https://address-test.npd.msa.vitality.co.uk
-            roothost_direct_patterns = [
-                r'rootHost:\s*(https?://[^\s\n\r]+)',  # rootHost: https://url
-                r'rootHost:\s*([^\s\n\r]+)',           # rootHost: any_value  
-                r'roothost:\s*(https?://[^\s\n\r]+)',  # case insensitive
-                r'roothost:\s*([^\s\n\r]+)',           # case insensitive any value
-                r'ROOT_HOST:\s*(https?://[^\s\n\r]+)', # uppercase
-                r'ROOT_HOST:\s*([^\s\n\r]+)',          # uppercase any value
-            ]
-            
-            for pattern in roothost_direct_patterns:
-                matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
-                if matches:
-                    roothost_value = matches[0].strip().strip('"\'').strip()
-                    # Only accept if it looks like a valid URL or has meaningful content
-                    if roothost_value and not roothost_value.startswith('{{') and len(roothost_value) > 5:
-                        endpoint_type = "operation_policy_yaml_roothost"
-                        print(f"Found rootHost direct pattern: {roothost_value}")
-                        return roothost_value, endpoint_type
-            
-            # Pattern 2: Look for any HTTP/HTTPS URLs in the content (for NEW APIs)
+            # For NEW APIs - ONLY look for actual URL values, NOT templates
             if 'operationPolicies:' in policy_content or 'parameters:' in policy_content:
-                url_pattern = r'(https?://[^\s\n\r\'"<>]+)'
+                print("Processing NEW API content...")
+                
+                # Pattern 1: Direct rootHost: URL extraction (most reliable)
+                roothost_url_patterns = [
+                    r'rootHost:\s*(https?://[^\s\n\r\'"<>]+)',  # rootHost: https://url (no quotes)
+                    r'rootHost:\s*["\']*(https?://[^\s\n\r\'"<>]+)["\']?',  # rootHost: "https://url" or 'https://url'
+                    r'roothost:\s*(https?://[^\s\n\r\'"<>]+)',  # case insensitive
+                    r'roothost:\s*["\']*(https?://[^\s\n\r\'"<>]+)["\']?',  # case insensitive with quotes
+                    r'ROOT_HOST:\s*(https?://[^\s\n\r\'"<>]+)',  # uppercase
+                    r'ROOT_HOST:\s*["\']*(https?://[^\s\n\r\'"<>]+)["\']?',  # uppercase with quotes
+                ]
+                
+                for pattern in roothost_url_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
+                    if matches:
+                        for match in matches:
+                            # Clean the match
+                            clean_match = match.strip().strip('"\'').strip()
+                            # Only accept actual URLs, not templates
+                            if clean_match.startswith('http') and '{{' not in clean_match and '${' not in clean_match:
+                                roothost_value = clean_match
+                                endpoint_type = "operation_policy_yaml_roothost"
+                                print(f"Found rootHost URL pattern: {roothost_value}")
+                                return roothost_value, endpoint_type
+                
+                # Pattern 2: Look for any standalone HTTP/HTTPS URLs in NEW API content
+                url_pattern = r'(https?://[^\s\n\r\'"<>{}$]+[^\s\n\r\'"<>{}$\.,])'
                 matches = re.findall(url_pattern, policy_content, re.IGNORECASE)
                 if matches:
-                    # Filter out common non-endpoint URLs
                     for url in matches:
-                        # Skip documentation URLs, localhost, etc.
-                        if not any(skip in url.lower() for skip in ['localhost', 'example.com', 'docs.', 'swagger']):
+                        # Filter out templates and common non-endpoint URLs
+                        if (not any(skip in url.lower() for skip in ['{{', '${', 'localhost', 'example.com', 'docs.', 'swagger']) 
+                            and len(url) > 10):
                             roothost_value = url.strip()
                             endpoint_type = "operation_policy_yaml_roothost"
-                            print(f"Found URL in NEW API content: {roothost_value}")
+                            print(f"Found standalone URL in NEW API content: {roothost_value}")
                             return roothost_value, endpoint_type
-            
-            # Pattern 3: Try standard YAML parsing as backup
-            if 'operationPolicies:' in policy_content or 'parameters:' in policy_content:
+                
+                # Pattern 3: Try YAML parsing for structured content
                 try:
                     yaml_content = yaml.safe_load(policy_content)
                     if isinstance(yaml_content, dict):
@@ -308,111 +312,127 @@ class WSO2APIManager:
                                 if isinstance(request_policies, list):
                                     for policy in request_policies:
                                         if 'parameters' in policy and 'rootHost' in policy['parameters']:
-                                            roothost_value = policy['parameters']['rootHost']
-                                            endpoint_type = "operation_policy_yaml_roothost"
-                                            print(f"Found YAML rootHost parameter (list): {roothost_value}")
-                                            return roothost_value.strip(), endpoint_type
+                                            candidate = policy['parameters']['rootHost']
+                                            # Only accept actual URLs, not templates
+                                            if isinstance(candidate, str) and candidate.startswith('http') and '{{' not in candidate:
+                                                roothost_value = candidate
+                                                endpoint_type = "operation_policy_yaml_roothost"
+                                                print(f"Found YAML rootHost parameter (list): {roothost_value}")
+                                                return roothost_value.strip(), endpoint_type
                                 elif isinstance(request_policies, dict):
                                     if 'parameters' in request_policies and 'rootHost' in request_policies['parameters']:
-                                        roothost_value = request_policies['parameters']['rootHost']
-                                        endpoint_type = "operation_policy_yaml_roothost"
-                                        print(f"Found YAML rootHost parameter (dict): {roothost_value}")
-                                        return roothost_value.strip(), endpoint_type
+                                        candidate = request_policies['parameters']['rootHost']
+                                        # Only accept actual URLs, not templates
+                                        if isinstance(candidate, str) and candidate.startswith('http') and '{{' not in candidate:
+                                            roothost_value = candidate
+                                            endpoint_type = "operation_policy_yaml_roothost"
+                                            print(f"Found YAML rootHost parameter (dict): {roothost_value}")
+                                            return roothost_value.strip(), endpoint_type
                         
                         # Also check direct parameters section
                         if 'parameters' in yaml_content and 'rootHost' in yaml_content['parameters']:
-                            roothost_value = yaml_content['parameters']['rootHost']
-                            endpoint_type = "operation_policy_yaml_roothost"
-                            print(f"Found YAML rootHost parameter (direct): {roothost_value}")
-                            return roothost_value.strip(), endpoint_type
-                            
+                            candidate = yaml_content['parameters']['rootHost']
+                            # Only accept actual URLs, not templates
+                            if isinstance(candidate, str) and candidate.startswith('http') and '{{' not in candidate:
+                                roothost_value = candidate
+                                endpoint_type = "operation_policy_yaml_roothost"
+                                print(f"Found YAML rootHost parameter (direct): {roothost_value}")
+                                return roothost_value.strip(), endpoint_type
+                                
                 except yaml.YAMLError as e:
                     print(f"YAML parsing failed: {e}")
                 except Exception as e:
                     print(f"YAML processing error: {e}")
+                
+                print("No actual URL values found in NEW API content")
+                # For NEW APIs, if we can't find actual URL, don't return template values
+                return "", "no_content"
             
-            # Pattern 4: Look for rootHost in J2 template files (for mediation policies)
-            j2_patterns = [
-                r'rootHost["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # rootHost = "value" or rootHost: "value"
-                r'roothost["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # case insensitive
-                r'ROOT_HOST["\s]*[=:]["\s]*([^"\s\n\r}]+)', # uppercase
-                r'root_host["\s]*[=:]["\s]*([^"\s\n\r}]+)', # underscore
-            ]
-            
-            for pattern in j2_patterns:
-                matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
-                if matches:
-                    roothost_value = matches[0].strip().strip('"\'')
-                    endpoint_type = "mediation_policy_j2_roothost"
-                    print(f"Found J2 rootHost: {roothost_value}")
-                    return roothost_value, endpoint_type
-            
-            # Pattern 5: XML property format (for XML-based mediation policies)
-            xml_property_patterns = [
-                r'<property[^>]*name=["\']rootHost["\'][^>]*value=["\']([^"\']+)["\']',
-                r'<property[^>]*name=["\']roothost["\'][^>]*value=["\']([^"\']+)["\']',
-                r'<property[^>]*name=["\']root_host["\'][^>]*value=["\']([^"\']+)["\']',
-                r'<property[^>]*name=["\']ROOT_HOST["\'][^>]*value=["\']([^"\']+)["\']',
-            ]
-            
-            for pattern in xml_property_patterns:
-                matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
-                if matches:
-                    roothost_value = matches[0]
-                    endpoint_type = "mediation_policy_xml_property"
-                    print(f"Found XML rootHost property: {roothost_value}")
-                    return roothost_value, endpoint_type
-            
-            # Pattern 6: Template variables in J2 files (should not be used for final value)
-            template_patterns = [
-                r'\{\{([^}]*[Rr]oot[Hh]ost[^}]*)\}\}',  # {{ rootHost }}
-                r'\{\{([^}]*[Hh]ost[^}]*)\}\}',         # {{ host }}
-                r'\{\{([^}]*[Ee]ndpoint[^}]*)\}\}',     # {{ endpoint }}
-                r'\$\{([^}]*[Rr]oot[Hh]ost[^}]*)\}',   # ${ rootHost }
-                r'\$\{([^}]*[Hh]ost[^}]*)\}',          # ${ host }
-            ]
-            
-            for pattern in template_patterns:
-                matches = re.findall(pattern, policy_content, re.IGNORECASE)
-                if matches:
-                    match = matches[0]
-                    if 'roothost' in match.lower() or 'host' in match.lower():
-                        if '{{' in policy_content:
-                            roothost_value = f"{{{{{match}}}}}"
-                        else:
-                            roothost_value = f"${{{match}}}"
-                        endpoint_type = "mediation_policy_j2_template"
-                        print(f"Found J2 template variable: {roothost_value}")
-                        # Note: This is a template, not actual value - should only be used for OLD APIs
+            # For OLD APIs (mediation policies) - can accept various formats
+            else:
+                print("Processing OLD API content...")
+                
+                # Pattern 1: Look for rootHost in J2 template files (for mediation policies)
+                j2_patterns = [
+                    r'rootHost["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # rootHost = "value" or rootHost: "value"
+                    r'roothost["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # case insensitive
+                    r'ROOT_HOST["\s]*[=:]["\s]*([^"\s\n\r}]+)', # uppercase
+                    r'root_host["\s]*[=:]["\s]*([^"\s\n\r}]+)', # underscore
+                ]
+                
+                for pattern in j2_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
+                    if matches:
+                        roothost_value = matches[0].strip().strip('"\'')
+                        endpoint_type = "mediation_policy_j2_roothost"
+                        print(f"Found J2 rootHost: {roothost_value}")
                         return roothost_value, endpoint_type
-            
-            # Pattern 7: Hardcoded URLs in address elements
-            url_patterns = [
-                r'<address\s+uri=["\']([^"\']+)["\']',
-                r'<endpoint[^>]*>.*?<address[^>]+uri=["\']([^"\']+)["\']',
-                r'<http[^>]*>.*?<uri-template[^>]*>([^<]+)</uri-template>',
-                r'uri["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # For J2 files
-            ]
-            
-            for pattern in url_patterns:
-                matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
+                
+                # Pattern 2: XML property format (for XML-based mediation policies)
+                xml_property_patterns = [
+                    r'<property[^>]*name=["\']rootHost["\'][^>]*value=["\']([^"\']+)["\']',
+                    r'<property[^>]*name=["\']roothost["\'][^>]*value=["\']([^"\']+)["\']',
+                    r'<property[^>]*name=["\']root_host["\'][^>]*value=["\']([^"\']+)["\']',
+                    r'<property[^>]*name=["\']ROOT_HOST["\'][^>]*value=["\']([^"\']+)["\']',
+                ]
+                
+                for pattern in xml_property_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
+                    if matches:
+                        roothost_value = matches[0]
+                        endpoint_type = "mediation_policy_xml_property"
+                        print(f"Found XML rootHost property: {roothost_value}")
+                        return roothost_value, endpoint_type
+                
+                # Pattern 3: Hardcoded URLs in address elements
+                url_patterns = [
+                    r'<address\s+uri=["\']([^"\']+)["\']',
+                    r'<endpoint[^>]*>.*?<address[^>]+uri=["\']([^"\']+)["\']',
+                    r'<http[^>]*>.*?<uri-template[^>]*>([^<]+)</uri-template>',
+                    r'uri["\s]*[=:]["\s]*([^"\s\n\r}]+)',  # For J2 files
+                ]
+                
+                for pattern in url_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE | re.DOTALL)
+                    if matches:
+                        roothost_value = matches[0]
+                        endpoint_type = "mediation_policy_hardcoded_url"
+                        print(f"Found hardcoded URL: {roothost_value}")
+                        return roothost_value, endpoint_type
+                
+                # Pattern 4: Template variables in J2 files (for OLD APIs only)
+                template_patterns = [
+                    r'\{\{([^}]*[Rr]oot[Hh]ost[^}]*)\}\}',  # {{ rootHost }}
+                    r'\{\{([^}]*[Hh]ost[^}]*)\}\}',         # {{ host }}
+                    r'\{\{([^}]*[Ee]ndpoint[^}]*)\}\}',     # {{ endpoint }}
+                    r'\$\{([^}]*[Rr]oot[Hh]ost[^}]*)\}',   # ${ rootHost }
+                    r'\$\{([^}]*[Hh]ost[^}]*)\}',          # ${ host }
+                ]
+                
+                for pattern in template_patterns:
+                    matches = re.findall(pattern, policy_content, re.IGNORECASE)
+                    if matches:
+                        match = matches[0]
+                        if 'roothost' in match.lower() or 'host' in match.lower():
+                            if '{{' in policy_content:
+                                roothost_value = f"{{{{{match}}}}}"
+                            else:
+                                roothost_value = f"${{{match}}}"
+                            endpoint_type = "mediation_policy_j2_template"
+                            print(f"Found J2 template variable: {roothost_value}")
+                            return roothost_value, endpoint_type
+                
+                # Pattern 5: Look for any HTTP/HTTPS URLs in OLD API content (general fallback)
+                general_url_pattern = r'https?://[^\s<>"\'}\)]+[^\s<>"\'}\)\.,]'
+                matches = re.findall(general_url_pattern, policy_content)
                 if matches:
                     roothost_value = matches[0]
-                    endpoint_type = "mediation_policy_hardcoded_url"
-                    print(f"Found hardcoded URL: {roothost_value}")
+                    endpoint_type = "mediation_policy_general_url"
+                    print(f"Found general URL: {roothost_value}")
                     return roothost_value, endpoint_type
-            
-            # Pattern 8: Look for any HTTP/HTTPS URLs in content (general fallback)
-            general_url_pattern = r'https?://[^\s<>"\'}\)]+[^\s<>"\'}\)\.,]'
-            matches = re.findall(general_url_pattern, policy_content)
-            if matches:
-                roothost_value = matches[0]
-                endpoint_type = "mediation_policy_general_url"
-                print(f"Found general URL: {roothost_value}")
-                return roothost_value, endpoint_type
             
             print(f"No rootHost value found in policy content")
-            return roothost_value, endpoint_type
+            return "", "no_content"
             
         except Exception as e:
             print(f"Error extracting roothost from {policy_name}: {str(e)}")
