@@ -257,100 +257,136 @@ class WSO2APIManager:
             endpoint_type = "unknown"
             
             print(f"Analyzing policy: {policy_name}")
-            print(f"Content preview: {policy_content[:300]}...")
+            print(f"Content length: {len(policy_content)}")
+            print(f"Content preview: {policy_content[:400]}...")
+            
+            # Debug: Check what type of content we have
+            has_operation_policies = 'operationPolicies:' in policy_content
+            has_parameters = 'parameters:' in policy_content
+            has_templates = '{{' in policy_content or '${' in policy_content
+            
+            print(f"DEBUG - has_operation_policies: {has_operation_policies}")
+            print(f"DEBUG - has_parameters: {has_parameters}")
+            print(f"DEBUG - has_templates: {has_templates}")
             
             # For NEW APIs - ONLY look for actual URL values, NOT templates
-            if 'operationPolicies:' in policy_content or 'parameters:' in policy_content:
-                print("Processing NEW API content...")
+            if has_operation_policies or has_parameters:
+                print("Processing as NEW API content...")
                 
                 # Pattern 1: Direct rootHost: URL extraction (most reliable)
                 roothost_url_patterns = [
-                    r'rootHost:\s*(https?://[^\s\n\r\'"<>]+)',  # rootHost: https://url (no quotes)
-                    r'rootHost:\s*["\']*(https?://[^\s\n\r\'"<>]+)["\']?',  # rootHost: "https://url" or 'https://url'
-                    r'roothost:\s*(https?://[^\s\n\r\'"<>]+)',  # case insensitive
-                    r'roothost:\s*["\']*(https?://[^\s\n\r\'"<>]+)["\']?',  # case insensitive with quotes
-                    r'ROOT_HOST:\s*(https?://[^\s\n\r\'"<>]+)',  # uppercase
-                    r'ROOT_HOST:\s*["\']*(https?://[^\s\n\r\'"<>]+)["\']?',  # uppercase with quotes
+                    r'rootHost:\s*(https?://[^\s\n\r\'"<>{}$]+)',  # rootHost: https://url (no templates)
+                    r'rootHost:\s*["\']*(https?://[^\s\n\r\'"<>{}$]+)["\']?',  # rootHost: "https://url"
+                    r'roothost:\s*(https?://[^\s\n\r\'"<>{}$]+)',  # case insensitive
+                    r'roothost:\s*["\']*(https?://[^\s\n\r\'"<>{}$]+)["\']?',  # case insensitive with quotes
+                    r'ROOT_HOST:\s*(https?://[^\s\n\r\'"<>{}$]+)',  # uppercase
+                    r'ROOT_HOST:\s*["\']*(https?://[^\s\n\r\'"<>{}$]+)["\']?',  # uppercase with quotes
                 ]
                 
-                for pattern in roothost_url_patterns:
+                for i, pattern in enumerate(roothost_url_patterns):
+                    print(f"DEBUG - Trying NEW API pattern {i+1}: {pattern}")
                     matches = re.findall(pattern, policy_content, re.IGNORECASE | re.MULTILINE)
                     if matches:
+                        print(f"DEBUG - Pattern {i+1} found matches: {matches}")
                         for match in matches:
                             # Clean the match
                             clean_match = match.strip().strip('"\'').strip()
+                            print(f"DEBUG - Evaluating match: '{clean_match}'")
                             # Only accept actual URLs, not templates
-                            if clean_match.startswith('http') and '{{' not in clean_match and '${' not in clean_match:
+                            if (clean_match.startswith('http') and 
+                                '{{' not in clean_match and 
+                                '${' not in clean_match and
+                                len(clean_match) > 10):
                                 roothost_value = clean_match
                                 endpoint_type = "operation_policy_yaml_roothost"
-                                print(f"Found rootHost URL pattern: {roothost_value}")
+                                print(f"✅ Found rootHost URL pattern: {roothost_value}")
                                 return roothost_value, endpoint_type
+                            else:
+                                print(f"❌ Rejected match: {clean_match} (not valid URL or contains templates)")
                 
                 # Pattern 2: Look for any standalone HTTP/HTTPS URLs in NEW API content
+                print("DEBUG - Trying standalone URL pattern for NEW API...")
                 url_pattern = r'(https?://[^\s\n\r\'"<>{}$]+[^\s\n\r\'"<>{}$\.,])'
                 matches = re.findall(url_pattern, policy_content, re.IGNORECASE)
                 if matches:
+                    print(f"DEBUG - Found URLs: {matches}")
                     for url in matches:
                         # Filter out templates and common non-endpoint URLs
                         if (not any(skip in url.lower() for skip in ['{{', '${', 'localhost', 'example.com', 'docs.', 'swagger']) 
                             and len(url) > 10):
                             roothost_value = url.strip()
                             endpoint_type = "operation_policy_yaml_roothost"
-                            print(f"Found standalone URL in NEW API content: {roothost_value}")
+                            print(f"✅ Found standalone URL in NEW API content: {roothost_value}")
                             return roothost_value, endpoint_type
+                        else:
+                            print(f"❌ Rejected URL: {url} (contains templates or is documentation)")
                 
                 # Pattern 3: Try YAML parsing for structured content
+                print("DEBUG - Trying YAML parsing for NEW API...")
                 try:
                     yaml_content = yaml.safe_load(policy_content)
                     if isinstance(yaml_content, dict):
+                        print(f"DEBUG - YAML parsed successfully, keys: {list(yaml_content.keys())}")
                         # Look for operation policies with parameters
                         if 'operationPolicies' in yaml_content:
                             op_policies = yaml_content['operationPolicies']
                             if 'request' in op_policies:
                                 request_policies = op_policies['request']
+                                print(f"DEBUG - Request policies type: {type(request_policies)}")
                                 # Handle both list and single policy formats
                                 if isinstance(request_policies, list):
-                                    for policy in request_policies:
+                                    for j, policy in enumerate(request_policies):
+                                        print(f"DEBUG - Checking policy {j}: {policy.get('policyName', 'Unknown')}")
                                         if 'parameters' in policy and 'rootHost' in policy['parameters']:
                                             candidate = policy['parameters']['rootHost']
+                                            print(f"DEBUG - Found rootHost candidate: '{candidate}'")
                                             # Only accept actual URLs, not templates
                                             if isinstance(candidate, str) and candidate.startswith('http') and '{{' not in candidate:
                                                 roothost_value = candidate
                                                 endpoint_type = "operation_policy_yaml_roothost"
-                                                print(f"Found YAML rootHost parameter (list): {roothost_value}")
+                                                print(f"✅ Found YAML rootHost parameter (list): {roothost_value}")
                                                 return roothost_value.strip(), endpoint_type
+                                            else:
+                                                print(f"❌ Rejected YAML candidate: {candidate} (not valid URL or contains templates)")
                                 elif isinstance(request_policies, dict):
+                                    print(f"DEBUG - Request policies is dict: {request_policies.keys()}")
                                     if 'parameters' in request_policies and 'rootHost' in request_policies['parameters']:
                                         candidate = request_policies['parameters']['rootHost']
+                                        print(f"DEBUG - Found rootHost candidate: '{candidate}'")
                                         # Only accept actual URLs, not templates
                                         if isinstance(candidate, str) and candidate.startswith('http') and '{{' not in candidate:
                                             roothost_value = candidate
                                             endpoint_type = "operation_policy_yaml_roothost"
-                                            print(f"Found YAML rootHost parameter (dict): {roothost_value}")
+                                            print(f"✅ Found YAML rootHost parameter (dict): {roothost_value}")
                                             return roothost_value.strip(), endpoint_type
+                                        else:
+                                            print(f"❌ Rejected YAML candidate: {candidate} (not valid URL or contains templates)")
                         
                         # Also check direct parameters section
                         if 'parameters' in yaml_content and 'rootHost' in yaml_content['parameters']:
                             candidate = yaml_content['parameters']['rootHost']
+                            print(f"DEBUG - Found direct rootHost candidate: '{candidate}'")
                             # Only accept actual URLs, not templates
                             if isinstance(candidate, str) and candidate.startswith('http') and '{{' not in candidate:
                                 roothost_value = candidate
                                 endpoint_type = "operation_policy_yaml_roothost"
-                                print(f"Found YAML rootHost parameter (direct): {roothost_value}")
+                                print(f"✅ Found YAML rootHost parameter (direct): {roothost_value}")
                                 return roothost_value.strip(), endpoint_type
+                            else:
+                                print(f"❌ Rejected direct YAML candidate: {candidate} (not valid URL or contains templates)")
                                 
                 except yaml.YAMLError as e:
-                    print(f"YAML parsing failed: {e}")
+                    print(f"DEBUG - YAML parsing failed: {e}")
                 except Exception as e:
-                    print(f"YAML processing error: {e}")
+                    print(f"DEBUG - YAML processing error: {e}")
                 
-                print("No actual URL values found in NEW API content")
+                print("❌ No actual URL values found in NEW API content - returning empty")
                 # For NEW APIs, if we can't find actual URL, don't return template values
                 return "", "no_content"
             
             # For OLD APIs (mediation policies) - can accept various formats
             else:
-                print("Processing OLD API content...")
+                print("Processing as OLD API content...")
                 
                 # Pattern 1: Look for rootHost in J2 template files (for mediation policies)
                 j2_patterns = [
@@ -401,6 +437,7 @@ class WSO2APIManager:
                         return roothost_value, endpoint_type
                 
                 # Pattern 4: Template variables in J2 files (for OLD APIs only)
+                print("DEBUG - Checking for templates in OLD API content...")
                 template_patterns = [
                     r'\{\{([^}]*[Rr]oot[Hh]ost[^}]*)\}\}',  # {{ rootHost }}
                     r'\{\{([^}]*[Hh]ost[^}]*)\}\}',         # {{ host }}
@@ -419,7 +456,7 @@ class WSO2APIManager:
                             else:
                                 roothost_value = f"${{{match}}}"
                             endpoint_type = "mediation_policy_j2_template"
-                            print(f"Found J2 template variable: {roothost_value}")
+                            print(f"Found J2 template variable (OLD API): {roothost_value}")
                             return roothost_value, endpoint_type
                 
                 # Pattern 5: Look for any HTTP/HTTPS URLs in OLD API content (general fallback)
@@ -431,11 +468,11 @@ class WSO2APIManager:
                     print(f"Found general URL: {roothost_value}")
                     return roothost_value, endpoint_type
             
-            print(f"No rootHost value found in policy content")
+            print(f"❌ No rootHost value found in policy content")
             return "", "no_content"
             
         except Exception as e:
-            print(f"Error extracting roothost from {policy_name}: {str(e)}")
+            print(f"❌ Error extracting roothost from {policy_name}: {str(e)}")
             return "", "extraction_error"
     
     def analyze_api(self, api_id, api_name, api_version):
